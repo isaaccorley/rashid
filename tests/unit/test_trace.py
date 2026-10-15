@@ -516,12 +516,14 @@ def test_a_captured_warning_reaches_stderr_and_the_log_file(
         warnings.simplefilter("always")
         _trace.configure_logging("debug", str(log_file))
         warnings.warn("old API", UserWarning, stacklevel=1)
+        assert warnings.showwarning is logging._showwarning  # type: ignore[attr-defined]
         _trace.configure_logging(None)
+        # Checked inside the block: on exit catch_warnings restores showwarning itself.
+        assert warnings.showwarning is not logging._showwarning  # type: ignore[attr-defined]
     assert "WARNING py.warnings:" in capsys.readouterr().err
     (entry,) = [json.loads(line) for line in log_file.read_text(encoding="utf-8").splitlines()]
     assert entry["logger"] == "py.warnings"
     assert "UserWarning: old API" in entry["message"]
-    assert warnings.showwarning is not logging._showwarning  # type: ignore[attr-defined]
 
 
 def test_stderr_handler_follows_a_swapped_stream(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -591,6 +593,13 @@ def test_env_trace_registers_the_path(monkeypatch: pytest.MonkeyPatch, tmp_path:
     _trace.configure_from_env({"RASHID_TRACE": out})
     assert _trace._trace_paths == [out]
     assert _trace.enabled()
+
+
+def test_warn_once_prints_a_message_once(capsys: pytest.CaptureFixture[str]) -> None:
+    _trace.warn_once("ignoring X: bad")
+    _trace.warn_once("ignoring X: bad")
+    _trace.warn_once("ignoring Y: bad")
+    assert capsys.readouterr().err == "rashid: ignoring X: bad\nrashid: ignoring Y: bad\n"
 
 
 def test_env_trace_into_a_missing_directory_prints_one_line(

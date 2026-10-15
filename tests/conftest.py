@@ -31,6 +31,7 @@ def _trace_isolation() -> Iterator[None]:
     """
     _trace.enable(None)
     _trace.reset()
+    _trace._warned.clear()
     yield
     _trace.enable(None)
     _trace.configure_logging(None)

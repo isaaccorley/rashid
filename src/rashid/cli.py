@@ -96,7 +96,9 @@ def main(
         try:
             _trace.configure_logging(level, log_file)
         except OSError as exc:
-            raise click.UsageError(f"{_trace.ENV_LOG_FILE} cannot be opened: {exc}") from exc
+            # The same message the import prints, so the user reads it once.
+            _trace.warn_once(f"ignoring {_trace.ENV_LOG}/{_trace.ENV_LOG_FILE}: {exc}")
+            _trace.configure_logging(level)
     timings_mode = "on" if timings else _trace.env_timings()
     if timings_mode is not None and not _trace.enabled():
         _trace.enable(timings_mode)

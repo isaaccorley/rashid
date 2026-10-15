@@ -133,14 +133,27 @@ def test_trace_into_a_missing_directory_fails_before_the_run(root: Path, tmp_pat
     assert "files checked" not in result.output
 
 
-def test_verbose_with_an_unopenable_log_file_is_a_usage_error(
+def test_verbose_ignores_an_unopenable_log_file_as_the_import_does(
+    root: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    log_file = str(tmp_path / "missing" / "run.jsonl")
+    monkeypatch.setenv("RASHID_LOG_FILE", log_file)
+    # The import-time path reports the bad file first, as it does in a real run.
+    _trace.configure_from_env({"RASHID_LOG_FILE": log_file})
+    result = CliRunner().invoke(main, [*_check("-vv"), str(root)])
+    assert result.exit_code == 0
+    assert "no findings" in result.stdout
+    assert "ignoring RASHID_LOG/RASHID_LOG_FILE" not in result.stderr
+    assert " DEBUG rashid.runner: rules: start" in result.stderr
+
+
+def test_verbose_reports_an_unopenable_log_file_once(
     root: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("RASHID_LOG_FILE", str(tmp_path / "missing" / "run.jsonl"))
     result = CliRunner().invoke(main, [*_check("-v"), str(root)])
-    assert result.exit_code == 2
-    assert "RASHID_LOG_FILE cannot be opened" in result.output
-    assert result.exception is None or isinstance(result.exception, SystemExit)
+    assert result.exit_code == 0
+    assert result.stderr.count("rashid: ignoring RASHID_LOG/RASHID_LOG_FILE:") == 1
 
 
 def test_help_says_verbose_does_not_change_findings() -> None:

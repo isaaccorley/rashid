@@ -474,6 +474,20 @@ _captured_warnings = False
 # Values of ``*_TIMINGS`` that leave spans off.
 _FALSE = ("", "0", "false", "no", "off")
 
+# Messages warn_once already printed.
+_warned: set[str] = set()
+
+
+def warn_once(message: str) -> None:
+    """Print ``message`` to stderr, prefixed with the package name, once per process.
+
+    The import and a CLI can both find the same bad variable. The user then
+    reads one line, not two.
+    """
+    if message not in _warned:
+        _warned.add(message)
+        print(f"{_PACKAGE}: {message}", file=sys.stderr)
+
 
 def parse_level(name: str) -> int:
     """The :mod:`logging` level for ``debug``, ``info``, ``warning``, or ``error``."""
@@ -547,7 +561,7 @@ def configure_from_env(environ: Mapping[str, str] = os.environ) -> None:
         try:
             configure_logging(level, log_file)
         except (ValueError, OSError) as exc:
-            print(f"{_PACKAGE}: ignoring {ENV_LOG}/{ENV_LOG_FILE}: {exc}", file=sys.stderr)
+            warn_once(f"ignoring {ENV_LOG}/{ENV_LOG_FILE}: {exc}")
     timings_mode = env_timings(environ)
     if timings_mode is not None:
         enable(timings_mode)
@@ -556,4 +570,4 @@ def configure_from_env(environ: Mapping[str, str] = os.environ) -> None:
         try:
             trace_to(trace_path)
         except OSError as exc:
-            print(f"{_PACKAGE}: ignoring {ENV_TRACE}: {exc}", file=sys.stderr)
+            warn_once(f"ignoring {ENV_TRACE}: {exc}")
