@@ -18,6 +18,7 @@ import sys
 import threading
 import time
 import tracemalloc
+import warnings
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -492,13 +493,35 @@ def test_configure_again_replaces_handlers_and_none_removes_them() -> None:
     assert logger.level == logging.NOTSET
 
 
-def test_debug_captures_warnings(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_debug_captures_warnings_and_teardown_releases_them(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     calls: list[bool] = []
     monkeypatch.setattr(_trace.logging, "captureWarnings", calls.append)
+    monkeypatch.setattr(_trace, "_captured_warnings", False)
     _trace.configure_logging("info")
     assert calls == []
     _trace.configure_logging("debug")
     assert calls == [True]
+    _trace.configure_logging(None)
+    assert calls == [True, False]
+    assert logging.getLogger("py.warnings").handlers == []
+
+
+def test_a_captured_warning_reaches_stderr_and_the_log_file(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    log_file = tmp_path / "run.jsonl"
+    with warnings.catch_warnings():
+        warnings.simplefilter("always")
+        _trace.configure_logging("debug", str(log_file))
+        warnings.warn("old API", UserWarning, stacklevel=1)
+        _trace.configure_logging(None)
+    assert "WARNING py.warnings:" in capsys.readouterr().err
+    (entry,) = [json.loads(line) for line in log_file.read_text(encoding="utf-8").splitlines()]
+    assert entry["logger"] == "py.warnings"
+    assert "UserWarning: old API" in entry["message"]
+    assert warnings.showwarning is not logging._showwarning  # type: ignore[attr-defined]
 
 
 def test_stderr_handler_follows_a_swapped_stream(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -568,6 +591,37 @@ def test_env_trace_registers_the_path(monkeypatch: pytest.MonkeyPatch, tmp_path:
     _trace.configure_from_env({"RASHID_TRACE": out})
     assert _trace._trace_paths == [out]
     assert _trace.enabled()
+
+
+def test_env_trace_into_a_missing_directory_prints_one_line(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr(_trace, "_trace_paths", [])
+    monkeypatch.setattr(_trace.atexit, "register", lambda fn: None)
+    _trace.configure_from_env({"RASHID_TRACE": str(tmp_path / "missing" / "t.json")})
+    err = capsys.readouterr().err
+    assert err.startswith("rashid: ignoring RASHID_TRACE: trace directory")
+    assert err.count("\n") == 1
+    assert _trace._trace_paths == []
+
+
+def test_a_failed_trace_write_at_exit_prints_one_line(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    gone = tmp_path / "gone"
+    gone.mkdir()
+    monkeypatch.setattr(_trace, "_trace_paths", [str(gone / "t.json")])
+    gone.rmdir()
+    _trace._write_traces()
+    assert capsys.readouterr().err.startswith("rashid: cannot write trace ")
+
+
+@pytest.mark.parametrize(
+    ("value", "mode"), [(None, None), ("off", None), ("1", "on"), ("Mem", "mem")]
+)
+def test_env_timings(value: str | None, mode: str | None) -> None:
+    environ = {} if value is None else {"RASHID_TIMINGS": value}
+    assert _trace.env_timings(environ) == mode
 
 
 def test_env_names_derive_from_the_package() -> None:

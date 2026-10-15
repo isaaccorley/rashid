@@ -38,6 +38,10 @@ def test_plain_json_has_no_meta(root: Path) -> None:
 
 
 def test_timings_add_meta_to_json(root: Path) -> None:
+    # The first run in a process parses the bundled schemas into lru_cache
+    # registries. Warm up, so the count below does not depend on test order.
+    CliRunner().invoke(main, [*_check(), "--json", str(root)])
+    _trace.reset()
     result = CliRunner().invoke(main, [*_check("--timings"), "--json", str(root)])
     meta = json.loads(result.stdout)["meta"]
     assert meta["version"] == version("rashid")
@@ -99,6 +103,44 @@ def test_trace_flag_writes_a_chrome_trace(
     _trace._write_traces()
     events = json.loads(out.read_text())["traceEvents"]
     assert {"check", "load", "rules"} <= {e["name"] for e in events if e["ph"] == "X"}
+
+
+def test_trace_alone_adds_no_meta_and_no_table(
+    root: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(_trace, "_trace_paths", [])
+    monkeypatch.setattr(_trace.atexit, "register", lambda fn: None)
+    out = str(tmp_path / "trace.json")
+    as_json = CliRunner().invoke(main, [*_check("--trace", out), "--json", str(root)])
+    assert "meta" not in json.loads(as_json.stdout)
+    as_text = CliRunner().invoke(main, [*_check("--trace", out), str(root)])
+    assert as_json.stderr == as_text.stderr == ""
+    assert _trace.enabled()
+
+
+def test_timings_from_the_environment_add_meta(root: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("RASHID_TIMINGS", "1")
+    result = CliRunner().invoke(main, [*_check(), "--json", str(root)])
+    assert json.loads(result.stdout)["meta"]["timings"][0]["name"] == "check"
+
+
+def test_trace_into_a_missing_directory_fails_before_the_run(root: Path, tmp_path: Path) -> None:
+    out = tmp_path / "missing" / "trace.json"
+    result = CliRunner().invoke(main, [*_check("--trace", str(out)), str(root)])
+    assert result.exit_code == 2
+    assert "Invalid value for --trace" in result.output
+    assert "does not exist" in result.output
+    assert "files checked" not in result.output
+
+
+def test_verbose_with_an_unopenable_log_file_is_a_usage_error(
+    root: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("RASHID_LOG_FILE", str(tmp_path / "missing" / "run.jsonl"))
+    result = CliRunner().invoke(main, [*_check("-v"), str(root)])
+    assert result.exit_code == 2
+    assert "RASHID_LOG_FILE cannot be opened" in result.output
+    assert result.exception is None or isinstance(result.exception, SystemExit)
 
 
 def test_help_says_verbose_does_not_change_findings() -> None:

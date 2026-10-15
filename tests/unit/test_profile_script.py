@@ -52,6 +52,7 @@ def test_time_runs_the_script_under_pinned_pyinstrument(
     profile: ModuleType, tmp_path: Path
 ) -> None:
     command = profile.profiler_command("time", "remote", "large", 3, True, tmp_path / "x")
+    assert command[command.index("-o") + 1] == str(tmp_path / "x")
     assert command[:7] == [
         "uv",
         "run",

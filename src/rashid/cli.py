@@ -83,17 +83,30 @@ class CatalogLocation(click.ParamType[Path | str]):
     help="Write a Chrome trace of every stage to PATH at exit; open it in "
     "https://ui.perfetto.dev. Same as RASHID_TRACE.",
 )
-def main(verbose: int, quiet: bool, timings: bool, trace_path: str | None) -> None:
+@click.pass_context
+def main(
+    ctx: click.Context, verbose: int, quiet: bool, timings: bool, trace_path: str | None
+) -> None:
     """rashid — validator and linter for Portolan catalogs."""
     if verbose and quiet:
         raise click.UsageError("--verbose and --quiet ask for opposite things.")
     if verbose or quiet:
         level = "error" if quiet else ("info" if verbose == 1 else "debug")
-        _trace.configure_logging(level, os.environ.get(_trace.ENV_LOG_FILE) or None)
-    if timings and not _trace.enabled():
-        _trace.enable("on")
+        log_file = os.environ.get(_trace.ENV_LOG_FILE) or None
+        try:
+            _trace.configure_logging(level, log_file)
+        except OSError as exc:
+            raise click.UsageError(f"{_trace.ENV_LOG_FILE} cannot be opened: {exc}") from exc
+    timings_mode = "on" if timings else _trace.env_timings()
+    if timings_mode is not None and not _trace.enabled():
+        _trace.enable(timings_mode)
     if trace_path is not None:
-        _trace.trace_to(trace_path)
+        try:
+            _trace.trace_to(trace_path)
+        except OSError as exc:
+            raise click.BadParameter(str(exc), param_hint="--trace") from exc
+    # --trace turns spans on too, but only timings ask for the table or meta block.
+    ctx.obj = {"timings": timings_mode is not None}
 
 
 @main.command()
@@ -209,14 +222,16 @@ def check(
             live=live,
             live_base_url=live_base_url,
         )
+    root = click.get_current_context().find_root().obj or {}
+    show_timings = root.get("timings", False)
     if as_json:
         output = report.to_dict()
-        if _trace.enabled():
+        if show_timings:
             output["meta"] = _trace.meta(version("rashid"))
         click.echo(json_module.dumps(output, indent=2))
     else:
         _print_human(report, list_all=list_all, force_summary=force_summary)
-        if _trace.enabled():
+        if show_timings:
             click.echo(_trace.format_timings(_trace.timings()), err=True)
     raise SystemExit(0 if report.passed else 1)
 

@@ -90,7 +90,7 @@ def profiler_command(
     if mode == "time":
         return [
             *("uv", "run", "--with", PYINSTRUMENT, "python", "-m", "pyinstrument"),
-            *("-r", "text", "--show", "*/rashid/*", *target),
+            *("-r", "text", "--show", "*/rashid/*", "-o", str(out), *target),
         ]
     if mode == "mem":
         return [
@@ -185,8 +185,12 @@ def main(argv: list[str] | None = None) -> int:
         print(f"# {stem}: {refs:,} instructions (cachegrind Ir); details in {out}")
         return 0
     result = subprocess.run(command)
-    if result.returncode != 0 or args.mode != "mem":
+    if result.returncode != 0:
         return result.returncode
+    if args.mode == "time":
+        print(out.read_text(encoding="utf-8"))
+        print(f"# saved to {out}")
+        return 0
     stats = ["uv", "run", "--with", MEMRAY, "python", "-m", "memray", "stats", str(out)]
     return subprocess.run(stats).returncode
 

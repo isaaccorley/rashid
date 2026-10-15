@@ -386,7 +386,14 @@ _trace_paths: list[str] = []
 
 
 def trace_to(path: str) -> None:
-    """Turn spans on, and write the Chrome trace to ``path`` when the process exits."""
+    """Turn spans on, and write the Chrome trace to ``path`` when the process exits.
+
+    Raises :class:`FileNotFoundError` when the directory of ``path`` does not
+    exist, so a typo fails before the run rather than after it.
+    """
+    parent = Path(path).parent
+    if not parent.is_dir():
+        raise FileNotFoundError(f"trace directory {str(parent)!r} does not exist")
     if _mode is None:
         enable("on")
     if not _trace_paths:
@@ -397,7 +404,10 @@ def trace_to(path: str) -> None:
 
 def _write_traces() -> None:
     for path in _trace_paths:
-        write_chrome_trace(path)
+        try:
+            write_chrome_trace(path)
+        except OSError as exc:
+            print(f"{_PACKAGE}: cannot write trace {path}: {exc}", file=sys.stderr)
 
 
 # --- logging -----------------------------------------------------------------
@@ -458,6 +468,8 @@ class _Stderr(logging.StreamHandler):  # type: ignore[type-arg]
 
 
 _installed: list[logging.Handler] = []
+# Whether configure_logging turned on logging.captureWarnings, and so must turn it off.
+_captured_warnings = False
 
 # Values of ``*_TIMINGS`` that leave spans off.
 _FALSE = ("", "0", "false", "no", "off")
@@ -477,12 +489,21 @@ def configure_logging(level: str | None, log_file: str | None = None) -> None:
     Calling it again replaces the handlers the last call installed. With both
     arguments None it removes them, and the package logger falls back to its
     ``NullHandler``. stderr gets WARNING and above when only ``log_file`` is set.
+
+    At DEBUG, or with ``log_file``, Python warnings are logged too. They go
+    through the ``py.warnings`` logger, which gets the same handlers.
     """
+    global _captured_warnings
     logger = logging.getLogger(_PACKAGE)
+    warnings_logger = logging.getLogger("py.warnings")
     for handler in _installed:
         logger.removeHandler(handler)
+        warnings_logger.removeHandler(handler)
         handler.close()
     _installed.clear()
+    if _captured_warnings:
+        logging.captureWarnings(False)
+        _captured_warnings = False
     if level is None and log_file is None:
         logger.setLevel(logging.NOTSET)
         return
@@ -499,8 +520,19 @@ def configure_logging(level: str | None, log_file: str | None = None) -> None:
     for handler in _installed:
         logger.addHandler(handler)
     logger.setLevel(logging.DEBUG if log_file is not None else threshold)
-    if threshold <= logging.DEBUG:
+    if threshold <= logging.DEBUG or log_file is not None:
         logging.captureWarnings(True)
+        _captured_warnings = True
+        for handler in _installed:
+            warnings_logger.addHandler(handler)
+
+
+def env_timings(environ: Mapping[str, str] = os.environ) -> str | None:
+    """The spans mode that ``*_TIMINGS`` asks for: ``"on"``, ``"mem"``, or None."""
+    value = (environ.get(ENV_TIMINGS) or "").strip().lower()
+    if value in _FALSE:
+        return None
+    return "mem" if value == "mem" else "on"
 
 
 def configure_from_env(environ: Mapping[str, str] = os.environ) -> None:
@@ -516,9 +548,12 @@ def configure_from_env(environ: Mapping[str, str] = os.environ) -> None:
             configure_logging(level, log_file)
         except (ValueError, OSError) as exc:
             print(f"{_PACKAGE}: ignoring {ENV_LOG}/{ENV_LOG_FILE}: {exc}", file=sys.stderr)
-    timings_mode = (environ.get(ENV_TIMINGS) or "").strip().lower()
-    if timings_mode not in _FALSE:
-        enable("mem" if timings_mode == "mem" else "on")
+    timings_mode = env_timings(environ)
+    if timings_mode is not None:
+        enable(timings_mode)
     trace_path = environ.get(ENV_TRACE) or None
     if trace_path is not None:
-        trace_to(trace_path)
+        try:
+            trace_to(trace_path)
+        except OSError as exc:
+            print(f"{_PACKAGE}: ignoring {ENV_TRACE}: {exc}", file=sys.stderr)
