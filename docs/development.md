@@ -32,7 +32,7 @@ uv run pre-commit run --all-files --hook-stage pre-push
 
 CI runs these with [prek](https://github.com/j178/prek) rather than
 pre-commit. Both read the same `.pre-commit-config.yaml`. A clone without
-hooks installed therefore faces the same checks.
+hooks installed still faces the same checks.
 
 ## Tests
 
@@ -153,11 +153,11 @@ For a `perf:` pull request, include before-and-after measurements under `## Veri
 
 ## CI
 
-CI logic lives in
+CI logic is defined in
 [portolan-ops](https://github.com/portolan-sdi/portolan-ops) as a
 reusable workflow, and `.github/workflows/ci.yml` here is a thin caller.
 Change the shared floor there, not here. `norms/ci.md` in that repo
-covers how a change reaches this one.
+covers how a change there is synced to this repo.
 
 `security-audit.yml` stays local. It opens a tracking issue when
 pip-audit finds a vulnerability and closes it when the audit goes clean.
@@ -182,8 +182,8 @@ PATCH` to override the computed version, which is what past releases
 have done — `major_version_zero` keeps breaking changes off the major
 but still bumps the minor for a `feat`.
 
-**Squash-merge the release pull request.** `publish.yml` gates on the
-head commit message starting with `bump:`, and a merge commit reads
+**Squash-merge the release pull request.** `publish.yml` runs only when the
+head commit message starts with `bump:`, and a merge commit reads
 `Merge pull request #N from ...`, so the run skips with no error
 anywhere and nothing reaches PyPI. Squashing puts the `bump:` title on
 `main` and the workflow tags, builds, publishes, and creates the GitHub
