@@ -73,37 +73,8 @@ Files between `ops-sync` markers are synced from [portolan-ops](https://github.c
 One canonical home per fact. If a value like a color, URL, or policy line exists in portolan-ops, link to it rather than copying it.
 <!-- ops-sync:end -->
 
-## How to measure
+## Before a performance change
 
-Measure before and after a performance change, on a seeded scenario. Do
-not write your own timing loop. A reviewer cannot compare numbers from
-two different loops.
-
-```bash
-uv run python scripts/profile.py <metadata|data|remote> \
-  --size <small|large> \
-  --mode <counts|time|mem|import|instr>
-```
-
-`counts` prints the operation counters and the stage timings. `time` runs
-pyinstrument, `mem` runs memray, `import` reads `python -X importtime`, and
-`instr` counts instructions with cachegrind. See
-[docs/contributing.md](docs/contributing.md#measuring-performance) for
-each scenario.
-
-To debug a run, read its log. `rashid -vv check …` or `RASHID_LOG=debug`
-writes DEBUG records to stderr. `RASHID_LOG_FILE=<path>` writes every
-record as JSON lines. `rashid --timings check --json …` adds a `meta`
-block with stage timings and counters.
-
-A `perf:` pull request pastes one of these in `## Verification`, before and
-after, with the scenario name and size:
-
-- A counter change from `--mode counts`, with the updated exact count in
-  `tests/integration/test_operation_counts.py`.
-- A timing block from `--mode counts` or `--mode time`.
-- An instruction count from `--mode instr`.
-
-`tests/unit/test_import_budget.py` fails when `import rashid` or
-`rashid --help` loads the geospatial stack, jsonschema, or a profiler.
-Keep heavy imports inside the function that needs them.
+Read [docs/development.md](docs/development.md) first. It covers the
+profile script, the exact operation counts, and the evidence a `perf:`
+pull request needs.

@@ -68,18 +68,6 @@ A catalog can produce thousands of similar findings. After 50 findings, rashid g
 
 Use `--all` to list every finding. Use `--summary` to group any report by rule. JSON output always contains the complete `findings` array and a `summary.by_rule` object.
 
-## Timings and logs
-
-Put these flags before `check`. They write to stderr, and stdout keeps the report.
-
-```bash
-rashid --timings check path/to/catalog
-rashid -vv check https://data.example.org/my-catalog/catalog.json
-rashid --trace trace.json check path/to/catalog
-```
-
-`--timings` prints the time spent in each stage. With `--json`, it adds a `meta` block with the timings and operation counts instead. `-v` and `-vv` print `INFO` and `DEBUG` log records. `--trace` writes a Chrome trace that [Perfetto](https://ui.perfetto.dev) opens. The variables `RASHID_TIMINGS`, `RASHID_LOG`, `RASHID_LOG_FILE`, and `RASHID_TRACE` do the same for `validate()` in Python.
-
 ## Choose Additional Checks
 
 rashid provides six separate validation passes:
@@ -132,6 +120,7 @@ The public `rashid.api` module also provides helpers for tools that repair catal
 
 - [Rule reference](docs/rules.md) describes every validation pass, rule group, and degraded-pass code.
 - [Contributing guide](docs/contributing.md) covers development setup, tests, and repository checks.
+- [Development guide](docs/development.md) covers profiling, operation counts, logs, and timings.
 - [Portolan specification](https://github.com/portolan-sdi/portolan-spec) defines the requirements that rashid implements.
 
 ## License
