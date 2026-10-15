@@ -165,8 +165,11 @@ git push -u origin release/vX.Y.Z
 ```
 
 Replace `X.Y.Z` with the release version.
+
 <!-- vale ai-tells.VerbTricolon = NO -->
+
 `cz bump` updates `pyproject.toml`, refreshes `uv.lock` through a pre-bump hook, writes `CHANGELOG.md`, and creates a `bump:` commit and tag.
+
 <!-- vale ai-tells.VerbTricolon = YES -->
 
 Delete the local tag. `publish.yml` creates the tag on the merged commit; the local tag points to the release branch commit.
