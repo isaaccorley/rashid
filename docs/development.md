@@ -113,7 +113,7 @@ Counters are always enabled. `tests/integration/test_operation_counts.py` checks
 
 If your change reduces the work performed, update the expected counts in the same pull request.
 
-`tests/unit/test_import_budget.py` checks that `import rashid` and `rashid --help` do not load the geospatial stack, jsonschema, or a profiler. Keep heavy imports inside the functions that need them.
+`tests/unit/test_import_budget.py` checks that `import rashid` and `rashid --help` do not load the geospatial stack, jsonschema, the network stack, or a profiler. Keep heavy imports inside the functions that need them.
 
 ## Logs and timings
 

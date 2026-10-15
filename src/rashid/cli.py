@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import json as json_module
 import os
-from importlib.metadata import version
 from pathlib import Path
 
 import click
@@ -229,6 +228,8 @@ def check(
     if as_json:
         output = report.to_dict()
         if show_timings:
+            from importlib.metadata import version
+
             output["meta"] = _trace.meta(version("rashid"))
         click.echo(json_module.dumps(output, indent=2))
     else:

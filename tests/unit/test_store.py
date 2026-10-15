@@ -264,7 +264,7 @@ def test_only_the_store_and_the_live_prober_import_urllib_request() -> None:
 
     import rashid
 
-    importers = []
+    importers: set[str] = set()
     for path in sorted(Path(rashid.__file__).parent.rglob("*.py")):
         tree = ast.parse(path.read_text(encoding="utf-8"))
         for node in ast.walk(tree):
@@ -276,8 +276,8 @@ def test_only_the_store_and_the_live_prober_import_urllib_request() -> None:
                 else []
             )
             if any(name.startswith("urllib.request") for name in names):
-                importers.append(path.name)
-    assert importers == ["_store.py", "live.py"]
+                importers.add(path.name)
+    assert importers == {"_store.py", "live.py"}
 
 
 def test_urllib_follows_a_redirect_to_https(https_server: HttpsServer) -> None:

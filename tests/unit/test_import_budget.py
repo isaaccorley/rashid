@@ -32,6 +32,10 @@ _HEAVY = frozenset(
 )
 # Profilers run the code; the code never imports them.
 _PROFILERS = frozenset({"pyinstrument", "memray"})
+# Loaded on the first HTTPS request. A local check sends none.
+_NETWORK = frozenset({"obstore", "ssl", "urllib.request"})
+# Read on the first request, for the agent, or for --version and --timings.
+_METADATA = frozenset({"importlib.metadata"})
 
 _REPORT = "import sys, json; print(json.dumps(sorted(sys.modules)))"
 
@@ -44,13 +48,16 @@ def _loaded(code: str) -> set[str]:
         check=True,
         env={"PATH": "", "SYSTEMROOT": ""} if sys.platform == "win32" else {"PATH": ""},
     )
-    return {name.split(".")[0] for name in json.loads(result.stdout.splitlines()[-1])}
+    names = json.loads(result.stdout.splitlines()[-1])
+    # Each module by its full name and by its package, so a budget can name
+    # ``urllib.request`` without naming all of ``urllib``.
+    return {*names, *(name.split(".")[0] for name in names)}
 
 
 def test_import_rashid_loads_no_heavy_module_and_no_cli_framework() -> None:
     loaded = _loaded("import rashid")
     assert "rashid" in loaded
-    assert loaded & (_HEAVY | _PROFILERS | {"click"}) == set()
+    assert loaded & (_HEAVY | _PROFILERS | _NETWORK | _METADATA | {"click"}) == set()
 
 
 def test_cli_help_loads_no_heavy_module() -> None:
@@ -65,7 +72,7 @@ def test_cli_help_loads_no_heavy_module() -> None:
     )
     loaded = _loaded(code)
     assert "click" in loaded
-    assert loaded & (_HEAVY | _PROFILERS) == set()
+    assert loaded & (_HEAVY | _PROFILERS | _NETWORK | _METADATA) == set()
 
 
 @pytest.mark.parametrize("module", ["rashid.data.checks"])
@@ -73,3 +80,15 @@ def test_the_budget_detects_a_heavy_import(module: str) -> None:
     """The check itself can fail: the data checks module loads the geo stack."""
     pytest.importorskip("pyarrow")
     assert {"pyarrow", "rasterio"} <= _loaded(f"import {module}")
+
+
+def test_the_budget_detects_the_network_stack() -> None:
+    """The first store loads obstore. Building it sends no request."""
+    loaded = _loaded("from rashid import _store\n_store._store('https://example.org')")
+    assert "obstore" in loaded
+
+
+def test_the_first_urllib_request_loads_ssl() -> None:
+    """The urllib transport loads ``ssl`` and ``urllib.request`` when it builds its opener."""
+    loaded = _loaded("from rashid import _store\n_store._opener()")
+    assert {"ssl", "urllib.request"} <= loaded
