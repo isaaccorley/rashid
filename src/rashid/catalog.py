@@ -350,11 +350,14 @@ class CatalogGraph:
     def children_of(self, node: Node) -> list[Node]:
         """Objects whose containment parent is ``node``."""
         if self._children is None:
-            self._children = {}
+            # Built aside and assigned whole: the data pass reads this from
+            # many threads, and none may see a half-filled index.
+            children: dict[PurePosixPath, list[Node]] = {}
             for n in self.iter():
                 parent = self.parent_of(n)
                 if parent is not None:
-                    self._children.setdefault(parent.path, []).append(n)
+                    children.setdefault(parent.path, []).append(n)
+            self._children = children
         return list(self._children.get(node.path, [])) if self._owns(node) else []
 
     def items_of(self, node: Node) -> list[Node]:
@@ -368,11 +371,13 @@ class CatalogGraph:
         upward.
         """
         if self._items is None:
-            self._items = {}
+            # Built aside and assigned whole, as in children_of.
+            items: dict[PurePosixPath, list[Node]] = {}
             for n in self.iter("item"):
                 collection = self.enclosing_collection_of(n)
                 if collection is not None:
-                    self._items.setdefault(collection.path, []).append(n)
+                    items.setdefault(collection.path, []).append(n)
+            self._items = items
         return list(self._items.get(node.path, [])) if self._owns(node) else []
 
     def _owns(self, node: Node) -> bool:

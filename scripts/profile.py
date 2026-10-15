@@ -143,7 +143,7 @@ def main(argv: list[str] | None = None) -> int:
         description="Measure one seeded rashid scenario.",
         epilog="See tests/scenarios.py for what each scenario holds.",
     )
-    parser.add_argument("scenario", choices=("metadata", "data", "remote"))
+    parser.add_argument("scenario", choices=("metadata", "data", "remote", "remote-data"))
     parser.add_argument("--size", choices=("small", "large"), default="small")
     parser.add_argument("--mode", choices=MODES, default="counts")
     parser.add_argument("--seed", type=int, default=0)

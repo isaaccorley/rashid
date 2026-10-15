@@ -62,6 +62,7 @@ Use `scripts/profile.py` for repeatable performance measurements. The seeded sce
 uv run python scripts/profile.py metadata --mode counts
 uv run python scripts/profile.py remote --size large --mode time
 uv run python scripts/profile.py data --mode mem
+uv run python scripts/profile.py remote-data --mode counts
 uv run python scripts/profile.py metadata --mode import
 uv run python scripts/profile.py metadata --size large --mode instr
 ```
@@ -71,6 +72,7 @@ Choose a scenario:
 - `metadata` validates collections and items without reading asset bytes.
 - `data` reads real GeoParquet and Cloud Optimized GeoTIFF files.
 - `remote` serves the `metadata` catalog over local HTTPS and validates it by URL, with the live pass enabled.
+- `remote-data` serves the `data` catalog over local HTTPS from a separate process and validates it by URL, with the data pass enabled. Each asset request waits 20 ms before the server answers, as a remote host would.
 
 Add `--warm` to run the scenario once before measuring, excluding the initial schema load.
 
@@ -108,7 +110,8 @@ Use this script for performance comparisons. Custom timing loops make results ha
 
 Counters are always enabled. `tests/integration/test_operation_counts.py` checks:
 
-- Exact counts for every small scenario and the large `metadata` scenario.
+- Exact counts for every small scenario and the large `metadata` and `data` scenarios.
+- The exact requests each asset in `remote-data` costs, and that the data pass sends them in parallel.
 - A memory ceiling for the large `metadata` scenario.
 
 If your change reduces the work performed, update the expected counts in the same pull request.

@@ -17,6 +17,12 @@ catalog or stays flat.
 ``remote``
     The ``metadata`` tree served over a local HTTPS server, validated by URL.
     It exercises the crawl pool, the live HEAD pool, and ``rashid._store``.
+``remote-data``
+    The ``data`` tree served over a local HTTPS server, validated by URL with
+    the data pass on. Every asset is remote, as on a published catalog, and
+    each asset request waits ``REMOTE_LATENCY`` before the server answers.
+    It exercises the remote reads of the data pass: obstore for the bytes
+    and the Parquet footers, GDAL ``/vsicurl`` for the rasters.
 
 ``scripts/profile.py`` runs these. Built trees are cached under
 ``.cache/scenarios``; bump ``GENERATOR_VERSION`` when the output changes.
@@ -25,20 +31,31 @@ catalog or stays flat.
 from __future__ import annotations
 
 import hashlib
+import os
 import random
 import shutil
+import tempfile
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import date, timedelta
 from pathlib import Path
 from typing import Any
+from unittest import mock
 
 from tests.conftest import CatalogBuilder, mutate_json
 
 GENERATOR_VERSION = 1
 
-NAMES = ("metadata", "data", "remote")
+NAMES = ("metadata", "data", "remote", "remote-data")
+
+#: Seconds each asset request in ``remote-data`` waits before the answer. A
+#: published host takes 0.3 to 0.9 s to a first byte (#219); this keeps the
+#: shape of that cost at a scale a test run can afford.
+REMOTE_LATENCY = 0.02
+
+#: Which tree each scenario builds. The remote scenarios serve a local tree.
+_TREES = {"metadata": "metadata", "data": "data", "remote": "metadata", "remote-data": "data"}
 SIZES = ("small", "large")
 
 #: ``metadata``: (collections, items per collection).
@@ -58,10 +75,15 @@ _TABLE_COLUMNS = [
 
 @dataclass(frozen=True)
 class Target:
-    """What to validate: a path or URL, and the keyword arguments for ``validate``."""
+    """What to validate: a path or URL, and the keyword arguments for ``validate``.
+
+    ``server`` is the local HTTPS server of a remote scenario, whose ``seen``
+    and ``peak_in_flight`` a test reads after the run.
+    """
 
     location: Path | str
     options: dict[str, Any] = field(default_factory=dict)
+    server: Any = None
 
 
 def _multihash(payload: bytes) -> str:
@@ -160,19 +182,20 @@ def build(name: str, size: str, dest: Path, seed: int = 0) -> Path:
         raise ValueError(f"scenario must be one of {NAMES}, got {name!r}")
     if size not in SIZES:
         raise ValueError(f"size must be one of {SIZES}, got {size!r}")
-    rng = random.Random(f"{name}-{size}-{seed}")
-    if name == "data":
+    # A remote scenario serves a local tree; the same seed gives the same tree.
+    tree = _TREES[name]
+    rng = random.Random(f"{tree}-{size}-{seed}")
+    if tree == "data":
         _write_data(dest, size, rng)
     else:
-        # remote serves the metadata tree; the same seed gives the same tree.
-        _write_metadata(dest, size, random.Random(f"metadata-{size}-{seed}"))
+        _write_metadata(dest, size, rng)
     return dest
 
 
 def cached(name: str, size: str, seed: int = 0, cache_dir: Path | None = None) -> Path:
     """The scenario's tree, built once into ``cache_dir`` and reused after that."""
     cache_dir = cache_dir or _CACHE
-    tree = "metadata" if name == "remote" else name
+    tree = _TREES[name]
     root = cache_dir / f"{tree}-{size}-{seed}-v{GENERATOR_VERSION}"
     if (root / ".complete").exists():
         return root / "catalog"
@@ -200,6 +223,9 @@ def target(name: str, size: str, seed: int = 0, cache_dir: Path | None = None) -
     For ``remote`` the tree is served over a local HTTPS server until the
     block ends. Every transport, the live probes included, reads
     ``rashid._store``'s certificate option, which the server sets.
+
+    ``remote-data`` serves its tree the same way, with the data pass on and
+    the live pass off, so the server sees the data pass's requests alone.
     """
     root = cached(name, size, seed, cache_dir)
     if name == "metadata":
@@ -208,12 +234,35 @@ def target(name: str, size: str, seed: int = 0, cache_dir: Path | None = None) -
     if name == "data":
         yield Target(root, {"data": True})
         return
+    if name == "remote-data":
+        with _remote_data(root) as found:
+            yield found
+        return
     from tests._https import Route, serving
 
     with serving() as server:
         for path in sorted(p for p in root.rglob("*") if p.is_file()):
             server.routes["/" + path.relative_to(root).as_posix()] = Route(body=path.read_bytes())
-        yield Target(server.url("catalog.json"), {"data": False, "live": True})
+        yield Target(server.url("catalog.json"), {"data": False, "live": True}, server)
+
+
+@contextmanager
+def _remote_data(root: Path) -> Iterator[Target]:
+    """Serve the ``data`` tree from a child process, ``REMOTE_LATENCY`` on each asset.
+
+    GDAL reads a ``/vsicurl`` URL through libcurl, which does not read
+    ``rashid._store``'s certificate option. rasterio points libcurl at certifi
+    through ``GDAL_CURL_CA_BUNDLE`` on import, and that option outranks
+    ``CURL_CA_BUNDLE``. So the variable names the server's CA for the
+    duration, and TLS verification stays on.
+    """
+    from tests._https import serving_tree
+
+    with serving_tree(root, REMOTE_LATENCY) as server, tempfile.TemporaryDirectory() as scratch:
+        bundle = Path(scratch) / "ca.pem"
+        bundle.write_bytes(server.ca_pem)
+        with mock.patch.dict(os.environ, {"GDAL_CURL_CA_BUNDLE": str(bundle)}):
+            yield Target(server.url("catalog.json"), {"data": True, "live": False}, server)
 
 
 def describe() -> str:
@@ -224,4 +273,8 @@ def describe() -> str:
         lines.append(f"metadata/{size}: {collections} collections x {items} items")
         lines.append(f"data/{size}: {_DATA_SHAPE[size]} GeoParquet + {_DATA_SHAPE[size]} COG items")
         lines.append(f"remote/{size}: metadata/{size} over local HTTPS, live pass on")
+        lines.append(
+            f"remote-data/{size}: data/{size} over local HTTPS, "
+            f"{REMOTE_LATENCY * 1000:.0f} ms per asset request"
+        )
     return "\n".join(lines)

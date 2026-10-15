@@ -21,6 +21,10 @@ Which bytes it may read is the caller's choice. ``reader_factory`` supplies the
 the checks that read the catalog's own files and skips the ones that would have
 to stream someone else's host.
 
+The pass checks objects on a thread pool and reports in catalog order. On a
+published catalog each asset read waits on the network, and a serial loop
+over thousands of assets took hours (#219).
+
 The heavy geospatial dependencies (``pyarrow``, ``rasterio``, ``rio-cogeo``,
 ``pyproj``) are core dependencies but are imported
 lazily by :func:`default_validator`, so the core package stays stdlib-only and a
@@ -30,10 +34,12 @@ catalog with no data pass installs nothing new.
 from __future__ import annotations
 
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from functools import partial
 from typing import Any
 
+from rashid import _trace
 from rashid.catalog import CatalogGraph, Kind, Node
 from rashid.data.reader import AssetReader, FilesystemHttpReader
 from rashid.model import Finding, Severity
@@ -115,6 +121,21 @@ SPEC_IDS: dict[str, tuple[str, ...]] = {
 # Assets are declared on collections and items; catalogs carry none.
 _DATA_KINDS: tuple[Kind, ...] = ("collection", "item")
 
+#: Objects with a remote asset checked at once. A remote asset costs several
+#: requests that each wait hundreds of milliseconds for a first byte (#219).
+#: obstore releases the GIL while it waits, and so does GDAL when it opens or
+#: reads a dataset. GDAL's sidecar probes run inside rasterio calls that keep
+#: the GIL, which is one reason checks.py turns them off for a remote asset.
+#: The threads then overlap those waits rather than queue on them.
+_REMOTE_WORKERS = 32
+
+#: Objects whose assets are all local checked at once. Parsing a footer and
+#: judging row order is Python work that holds the GIL, so threads past a few
+#: only contend for it: on the large ``data`` scenario the pass took 36 ms on
+#: 4 threads, 43 ms on 8, and 60 ms on 32. A few still overlap file reads and
+#: the hashing of large files, which release it.
+_LOCAL_WORKERS = 4
+
 
 @dataclass(frozen=True)
 class DataDefect:
@@ -181,6 +202,15 @@ def validate_data(
     systemically, returns a single ``PTL-DAT-000`` warning instead of failing the
     run — a systemic failure is reported once, not once per object.
 
+    An object with a remote asset is checked on a pool of ``_REMOTE_WORKERS``
+    threads, and any other on a pool of ``_LOCAL_WORKERS``; the two run at
+    once. Findings are emitted in catalog order, so the report does not depend on
+    which thread finishes first. The first object whose validator raises ends
+    the pass as the serial loop did: the findings of the objects before it are
+    kept, the objects not yet started are cancelled, and nothing after it is
+    reported. A ``validator`` and the reader ``reader_factory`` builds are
+    therefore called from several threads at once, and must be thread-safe.
+
     ``reader_factory`` chooses which assets are readable at all;
     :class:`~rashid.data.reader.LocalOnlyReader` narrows the pass to the
     catalog's own files. An asset its reader declines is skipped silently, so a
@@ -204,38 +234,81 @@ def validate_data(
             ]
 
     reader = (reader_factory or FilesystemHttpReader)(graph)
+    nodes = [node for node in graph.iter(*_DATA_KINDS) if node.parse_error is None]
     findings: list[Finding] = []
-    for node in graph.iter(*_DATA_KINDS):
-        if node.parse_error is not None:
-            continue
-        try:
-            defects = validator(node, reader)
-        except Exception as exc:  # noqa: BLE001 - any validator failure is systemic
-            findings.append(
-                Finding(
-                    rule_id=DAT_UNAVAILABLE,
-                    severity=Severity.WARNING,
-                    message=f"data validation could not run: {exc}",
-                    path=".",
+    remote = ThreadPoolExecutor(_REMOTE_WORKERS, thread_name_prefix="data-remote")
+    local = ThreadPoolExecutor(_LOCAL_WORKERS, thread_name_prefix="data-local")
+    try:
+        futures = [
+            _trace.submit(remote if _reads_remote(node, reader) else local, validator, node, reader)
+            for node in nodes
+        ]
+        for node, future in zip(nodes, futures, strict=True):
+            try:
+                defects = future.result()
+            except Exception as exc:  # noqa: BLE001 - any validator failure is systemic
+                findings.append(
+                    Finding(
+                        rule_id=DAT_UNAVAILABLE,
+                        severity=Severity.WARNING,
+                        message=f"data validation could not run: {exc}",
+                        path=".",
+                    )
                 )
+                return findings
+            findings.extend(_to_findings(node, defects))
+    finally:
+        # Every future is done on the normal path. On a systemic failure or an
+        # interrupt, drop the objects not yet started and return at once: an
+        # object already reading may be streaming gigabytes, and its result
+        # would be thrown away.
+        for pool in (remote, local):
+            pool.shutdown(wait=False, cancel_futures=True)
+    return findings
+
+
+def _reads_remote(node: Node, reader: AssetReader) -> bool:
+    """Whether any asset on ``node`` resolves to a remote URL under ``reader``.
+
+    Locating is the reader's own answer, so a narrowed reader such as
+    :class:`~rashid.data.reader.LocalOnlyReader` sends every object to the
+    local pool. A reader that fails here sends the object to the local pool
+    too, where the validator meets the same failure and the pass reports it
+    as a systemic one.
+    """
+    assets = node.data.get("assets")
+    if not isinstance(assets, dict):
+        return False
+    for asset in assets.values():
+        href = asset.get("href") if isinstance(asset, dict) else None
+        if isinstance(href, str) and href:
+            try:
+                located = reader.locate(node, href)
+            except Exception:  # noqa: BLE001 - the validator reports it
+                return False
+            if located is not None and located.is_remote:
+                return True
+    return False
+
+
+def _to_findings(node: Node, defects: list[DataDefect]) -> list[Finding]:
+    findings: list[Finding] = []
+    for defect in defects:
+        pointer = defect.json_pointer
+        if pointer is None:
+            pointer = f"/assets/{defect.asset_key}"
+            if defect.field is not None:
+                pointer = f"{pointer}/{defect.field}"
+        findings.append(
+            Finding(
+                rule_id=defect.rule_id,
+                severity=defect.severity,
+                message=defect.message,
+                path=str(node.path),
+                object_id=node.id,
+                json_pointer=pointer,
+                expected=defect.expected,
+                actual=defect.actual,
             )
-            return findings
-        for defect in defects:
-            pointer = defect.json_pointer
-            if pointer is None:
-                pointer = f"/assets/{defect.asset_key}"
-                if defect.field is not None:
-                    pointer = f"{pointer}/{defect.field}"
-            findings.append(
-                Finding(
-                    rule_id=defect.rule_id,
-                    severity=defect.severity,
-                    message=defect.message,
-                    path=str(node.path),
-                    object_id=node.id,
-                    json_pointer=pointer,
-                    expected=defect.expected,
-                    actual=defect.actual,
-                )
-            )
+        )
     return findings
