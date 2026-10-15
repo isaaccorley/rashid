@@ -201,8 +201,15 @@ def test_explicit_default_factory_matches_the_default(
 
 
 def _reader_recorder(seen: list[str]) -> Validator:
+    """Record whether the reader the validator gets would read a remote asset.
+
+    The pass hands the validator its reader behind a wrapper, so the
+    reader's answer, not its class, shows which factory built it.
+    """
+
     def check(node: Node, reader: AssetReader) -> list[DataDefect]:
-        seen.append(type(reader).__name__)
+        located = reader.locate(node, _REMOTE_HREF)
+        seen.append("remote" if located is not None else "local only")
         return []
 
     return check
@@ -220,7 +227,7 @@ def test_runner_threads_the_factory_through(catalog: CatalogBuilder) -> None:
         data_reader_factory=LocalOnlyReader,
     )
 
-    assert set(seen) == {"LocalOnlyReader"}
+    assert set(seen) == {"local only"}
 
 
 def test_runner_defaults_to_the_filesystem_http_reader(catalog: CatalogBuilder) -> None:
@@ -230,7 +237,7 @@ def test_runner_defaults_to_the_filesystem_http_reader(catalog: CatalogBuilder) 
 
     validate(root, structural=False, data_validator=_reader_recorder(seen))
 
-    assert set(seen) == {"FilesystemHttpReader"}
+    assert set(seen) == {"remote"}
 
 
 # --- the CLI option ---------------------------------------------------------

@@ -25,9 +25,11 @@ import pyarrow.parquet as pq  # noqa: E402
 from pyproj import CRS, Transformer  # noqa: E402
 
 import rashid.data.checks as checks  # noqa: E402
+from rashid import _trace  # noqa: E402
 from rashid.catalog import Node  # noqa: E402
 from rashid.data import (  # noqa: E402
     DAT_CHECKSUM,
+    DAT_CONSISTENCY,
     DAT_FORMAT,
     DAT_SIZE,
 )
@@ -310,10 +312,13 @@ def test_wgs84_bounds_skip_an_unprojectable_bbox(epsg: int) -> None:
 
 def test_consistency_skips_the_bbox_it_cannot_reproject(monkeypatch: pytest.MonkeyPatch) -> None:
     geo = checks._Geo(bbox=[3.0e6, -1.0e6, 5.0e6, 1.0e6], epsg=3832, crs=CRS.from_epsg(3832))
-    monkeypatch.setattr(checks, "_extract_geo", lambda expected, located: geo)
+    monkeypatch.setattr(checks, "_extract_geo", lambda expected, located, files: geo)
     located = Locator(is_remote=False, source="unused")
+    files = checks._AssetFiles(located)
 
-    defects = checks._check_consistency(_item(_asset()), "data", _asset(), "parquet", located)
+    defects = checks._check_consistency(
+        _item(_asset()), "data", _asset(), "parquet", located, files
+    )
 
     assert defects == []
 
@@ -447,7 +452,7 @@ def test_collapse_keeps_one_defect_per_shared_field() -> None:
 
 def test_check_raster_reader_error_is_info() -> None:
     located = Locator(is_remote=False, source="/no/such/file.tif")
-    defects = checks._check_raster("data", located)
+    defects = checks._check_raster("data", located, checks._AssetFiles(located))
     assert [d.rule_id for d in defects] == [checks.DAT_COG]
     assert defects[0].severity is Severity.INFO
 
@@ -455,15 +460,59 @@ def test_check_raster_reader_error_is_info() -> None:
 def test_geo_from_parquet_without_geo_metadata(tmp_path: Path) -> None:
     path = tmp_path / "plain.parquet"
     pq.write_table(pa.table({"value": [1, 2, 3]}), path)
-    assert checks._geo_from_parquet(Locator(is_remote=False, source=str(path))) is None
+    files = checks._AssetFiles(Locator(is_remote=False, source=str(path)))
+    assert checks._geo_from_parquet(files) is None
 
 
 def test_consistency_unreadable_is_info() -> None:
     node = _item(_asset())
     located = Locator(is_remote=False, source="/no/such/file.parquet")
-    defects = checks._check_consistency(node, "data", _asset(), "parquet", located)
+    files = checks._AssetFiles(located)
+    defects = checks._check_consistency(node, "data", _asset(), "parquet", located, files)
     assert [d.rule_id for d in defects] == [checks.DAT_CONSISTENCY]
     assert defects[0].severity is Severity.INFO
+
+
+@pytest.mark.parametrize("opener", ["parquet", "raster"])
+def test_asset_files_open_once_and_repeat_a_failure(opener: str) -> None:
+    """Every check sees the one exception the one open raised."""
+    files = checks._AssetFiles(Locator(is_remote=False, source="/no/such/file"))
+    raised = []
+    with _trace.counting() as delta:
+        for _ in range(3):
+            with pytest.raises(Exception) as caught:
+                getattr(files, opener)()
+            raised.append(caught.value)
+    assert raised[0] is raised[1] is raised[2]
+    assert delta == {f"{opener}.opens": 1}
+
+
+class _LocalReader(_FakeReader):
+    """Serves one local file's bytes and locates it, so the format checks run."""
+
+    def __init__(self, href: str, path: Path) -> None:
+        super().__init__(href, path.read_bytes())
+        self._path = path
+
+    def locate(self, node: Node, href: str) -> Locator | None:
+        return Locator(is_remote=False, source=str(self._path)) if href == self._href else None
+
+
+def test_unreadable_parquet_opens_once_and_reports_as_before(tmp_path: Path) -> None:
+    """A footer that will not parse is opened once, and only the consistency check reports it.
+
+    The GeoParquet and vector-column checks stay silent on an unreadable file,
+    as they did when each opened it for itself; the byte checks own it.
+    """
+    path = tmp_path / "data.parquet"
+    path.write_bytes(b"PAR1" + b"\x00" * 64 + b"PAR1")
+
+    with _trace.counting() as delta:
+        defects = checks.check_node(_item(_asset()), _LocalReader("./data.parquet", path))
+
+    assert delta["parquet.opens"] == 1
+    assert [(d.rule_id, d.severity) for d in defects] == [(DAT_CONSISTENCY, Severity.INFO)]
+    assert "spatial metadata could not be read" in defects[0].message
 
 
 def test_spatial_ordering_low_overlap() -> None:

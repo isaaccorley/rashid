@@ -47,6 +47,10 @@ def _loc(path: Path) -> Locator:
     return Locator(is_remote=False, source=str(path))
 
 
+def _files(path: Path) -> checks._AssetFiles:
+    return checks._AssetFiles(_loc(path))
+
+
 class _FileReader:
     """An asset reader backed by one local file, for driving check_node."""
 
@@ -72,11 +76,11 @@ def _node_with_asset(asset: dict) -> Node:
 
 
 def _gpq(path: Path) -> list:
-    return checks._check_geoparquet("data", _loc(path))
+    return checks._check_geoparquet("data", _files(path))
 
 
 def _raster(path: Path) -> list:
-    return checks._check_raster("data", _loc(path))
+    return checks._check_raster("data", _loc(path), _files(path))
 
 
 # --- GeoParquet ------------------------------------------------------------
@@ -718,7 +722,7 @@ def test_missing_geo_version_flags_dat_012(tmp_path: Path) -> None:
 
 
 def _tiles(path: Path) -> list:
-    return checks._check_tile_size("data", _loc(path))
+    return checks._check_tile_size("data", _files(path))
 
 
 def test_default_512_tiles_are_clean(tmp_path: Path) -> None:
@@ -1010,7 +1014,7 @@ def _tabular_collection(**overrides: object) -> Node:
 
 def _tabular(node: Node, path: Path) -> list:
     asset = {"href": "./data.parquet", "roles": ["data"]}
-    return checks._check_tabular(node, "data", asset, _loc(path))
+    return checks._check_tabular(node, "data", asset, _files(path))
 
 
 def _timestamp_column() -> dict[str, list[object]]:
@@ -1045,7 +1049,7 @@ def test_tabular_with_asset_level_table_columns_is_clean(tmp_path: Path) -> None
         "roles": ["data"],
         "table:columns": [{"name": "value", "type": "int64", "description": "a value"}],
     }
-    assert checks._check_tabular(_tabular_collection(), "data", asset, _loc(path)) == []
+    assert checks._check_tabular(_tabular_collection(), "data", asset, _files(path)) == []
 
 
 def test_tabular_temporal_column_without_extent_flags_dat_015(tmp_path: Path) -> None:
@@ -1084,14 +1088,14 @@ def test_non_data_roles_are_not_tabular(tmp_path: Path) -> None:
     path = tmp_path / "plain.parquet"
     assets.write_geoparquet(path, geo=False)
     asset = {"href": "./data.parquet", "roles": ["metadata"]}
-    assert checks._check_tabular(_tabular_collection(), "data", asset, _loc(path)) == []
+    assert checks._check_tabular(_tabular_collection(), "data", asset, _files(path)) == []
 
 
 def test_item_level_parquet_is_not_tabular(tmp_path: Path) -> None:
     path = tmp_path / "plain.parquet"
     assets.write_geoparquet(path, geo=False)
     node = _node_with_asset({"href": "./data.parquet", "roles": ["data"]})
-    assert checks._check_tabular(node, "data", node.data["assets"]["a"], _loc(path)) == []
+    assert checks._check_tabular(node, "data", node.data["assets"]["a"], _files(path)) == []
 
 
 # --- vector column documentation (PTL-DAT-017) ------------------------------
@@ -1118,7 +1122,7 @@ def _vector_item(**overrides: object) -> Node:
 
 def _vector(node: Node, path: Path, **asset_fields: object) -> list:
     asset = {"href": "./data.parquet", "roles": ["data"], **asset_fields}
-    return checks._check_vector_columns(node, "data", asset, _loc(path))
+    return checks._check_vector_columns(node, "data", asset, _files(path))
 
 
 def test_vector_collection_without_table_columns_flags_dat_017(tmp_path: Path) -> None:
@@ -1173,4 +1177,4 @@ def test_non_data_roles_are_not_vector(tmp_path: Path) -> None:
     path = tmp_path / "geo.parquet"
     assets.write_geoparquet(path)
     asset = {"href": "./data.parquet", "roles": ["metadata"]}
-    assert checks._check_vector_columns(_tabular_collection(), "data", asset, _loc(path)) == []
+    assert checks._check_vector_columns(_tabular_collection(), "data", asset, _files(path)) == []
