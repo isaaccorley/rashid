@@ -148,7 +148,7 @@ For a `perf:` pull request, include before-and-after measurements under `## Veri
 
 ## CI
 
-The shared CI workflow lives in [portolan-ops](https://github.com/portolan-sdi/portolan-ops). This repo's `.github/workflows/ci.yml` calls it. Change shared CI requirements in portolan-ops; its `norms/ci.md` explains how changes reach this repo.
+The shared CI workflow is defined in [portolan-ops](https://github.com/portolan-sdi/portolan-ops). This repo's `.github/workflows/ci.yml` calls it. Change shared CI requirements in portolan-ops; its `norms/ci.md` explains how changes sync to this repo.
 
 `security-audit.yml` stays in this repo. It opens a tracking issue when pip-audit finds a vulnerability and closes the issue when the audit passes.
 
@@ -164,9 +164,12 @@ git tag -d "vX.Y.Z"
 git push -u origin release/vX.Y.Z
 ```
 
-Replace `X.Y.Z` with the release version. `cz bump` updates `pyproject.toml`, refreshes `uv.lock` through a pre-bump hook, writes `CHANGELOG.md`, and creates a `bump:` commit and tag.
+Replace `X.Y.Z` with the release version.
+<!-- vale ai-tells.VerbTricolon = NO -->
+`cz bump` updates `pyproject.toml`, refreshes `uv.lock` through a pre-bump hook, writes `CHANGELOG.md`, and creates a `bump:` commit and tag.
+<!-- vale ai-tells.VerbTricolon = YES -->
 
-Delete the local tag as shown above. `publish.yml` creates the tag on the merged commit; the local tag points to the release branch commit.
+Delete the local tag. `publish.yml` creates the tag on the merged commit; the local tag points to the release branch commit.
 
 To override the calculated version, pass `--increment PATCH`, as past releases have done. With `major_version_zero` enabled, breaking changes do not trigger a major release, but `feat` commits still trigger a minor release.
 
