@@ -42,6 +42,7 @@ from rashid.live import (
     LIV_CORS_PREFLIGHT,
     LIV_HEAD_LENGTH,
     LIV_LINK_TARGET,
+    LIV_OFF_HTTPS,
     LIV_RANGE,
     LIV_SELF_BASE,
     validate_live,
@@ -115,6 +116,7 @@ _LIVE_RULE_IDS = frozenset(
         LIV_CORS_PREFLIGHT,
         LIV_LINK_TARGET,
         LIV_SELF_BASE,
+        LIV_OFF_HTTPS,
     }
 )
 
