@@ -1,33 +1,40 @@
 # Development
 
-This guide covers how to measure rashid and how to read what it logs. See
-the [contributing guide](contributing.md) for setup, tests, and CI.
+Use this guide to measure rashid’s performance and inspect its logs. For setup, tests, and CI, see the [contributing guide](contributing.md).
 
 ## Measuring performance
 
-A performance claim needs a number from a fixed input. The seeded
-scenarios in `tests/scenarios.py` build the same catalog every time, at a
-small and a large size. Comparing the two runs shows whether a cost grows
-with the catalog. `scripts/profile.py` runs one scenario and measures it:
+Use `scripts/profile.py` to measure performance with repeatable inputs. The seeded scenarios in `tests/scenarios.py` generate the same catalogs on every run. Compare the small and large sizes to see how costs grow with catalog size.
 
 ```bash
 uv run python scripts/profile.py metadata --mode counts
-uv run python scripts/profile.py remote --size large \
-  --mode time
+uv run python scripts/profile.py remote --size large --mode time
 uv run python scripts/profile.py data --mode mem
 uv run python scripts/profile.py metadata --mode import
-uv run python scripts/profile.py metadata --size large \
-  --mode instr
+uv run python scripts/profile.py metadata --size large --mode instr
 ```
 
-The `metadata` scenario validates collections and items without reading
-asset bytes. `data` reads real GeoParquet and Cloud Optimized GeoTIFF
-files. `remote` serves the `metadata` tree over a local HTTPS server and
-validates it by URL, with the live pass on. `--warm` runs once before the
-measured run, which leaves out the one-time schema load.
+Choose a scenario:
 
-The `counts` mode needs no extra package. It prints every operation
-counter and the time spent in each stage:
+- `metadata` validates collections and items without reading asset bytes.
+- `data` reads real GeoParquet and Cloud Optimized GeoTIFF files.
+- `remote` serves the `metadata` catalog over local HTTPS and validates it by URL, with the live pass enabled.
+
+Add `--warm` to run the scenario once before measuring, excluding the initial schema load.
+
+Choose a measurement mode:
+
+| Mode | Output | Requirements |
+|---|---|---|
+| `counts` | Operation counts and stage timings | No extra packages |
+| `time` | pyinstrument profile | Loaded automatically with `uv run --with` |
+| `mem` | memray profile | Loaded automatically with `uv run --with`; unavailable on Windows |
+| `import` | Slowest imports from `python -X importtime` | No extra packages |
+| `instr` | Instruction counts from cachegrind | Install `valgrind` first |
+
+The script pins the pyinstrument and memray versions; neither is a rashid dependency. Instruction counts vary less between runs than wall time. Profiler output goes to `.cache/profiles`.
+
+The `counts` output includes every operation counter and the time spent in each stage:
 
 ```text
 # metadata/small seed=0
@@ -43,32 +50,17 @@ structural            1         51.1         51.0         48.8
 extensions            1          2.3          2.3         49.1
 ```
 
-The `time` mode runs pyinstrument and `mem` runs memray. Both load through
-`uv run --with` at the pinned version in the script, so neither is a
-dependency of rashid. memray does not run on Windows. `import` lists the
-slowest imports from `python -X importtime`. The `instr` mode counts
-instructions with cachegrind. Install `valgrind` before you use it. An
-instruction count changes much less between runs than wall time.
-Profiler output goes to `.cache/profiles`.
-
-Do not write your own timing loop. A reviewer cannot compare numbers from
-two different loops.
+Use this script for performance comparisons. Custom timing loops make results harder to compare.
 
 ## Operation counts
 
-Counters are always on, and tests assert their exact values. The tests in
-`tests/integration/test_operation_counts.py` fix the counts for each small
-scenario and a memory ceiling for the large one. A change that does less
-work updates those numbers in the same pull request.
+Counters are always enabled. `tests/integration/test_operation_counts.py` asserts exact counts for each small scenario and for the large `metadata` scenario, plus a memory ceiling for the large `metadata` scenario. If your change reduces the work performed, update the expected counts in the same pull request.
 
-`tests/unit/test_import_budget.py` fails when `import rashid` or
-`rashid --help` loads the geospatial stack, jsonschema, or a profiler.
-Keep heavy imports inside the function that needs them.
+`tests/unit/test_import_budget.py` checks that `import rashid` and `rashid --help` do not load the geospatial stack, jsonschema, or a profiler. Keep heavy imports inside the functions that need them.
 
 ## Logs and timings on any catalog
 
-Put these flags before `check`. They write to stderr, and stdout keeps the
-report alone.
+Place logging and profiling flags before `check`:
 
 ```bash
 uv run rashid --timings check --json path/to/catalog
@@ -76,26 +68,23 @@ uv run rashid -vv check path/to/catalog
 uv run rashid --trace trace.json check path/to/catalog
 ```
 
-`--timings` adds a `meta` block to `--json` output, or prints the stage
-table to stderr. `-v` and `-vv` write `INFO` and `DEBUG` log records.
-`--trace` writes a Chrome trace, which <https://ui.perfetto.dev> opens.
+- `--timings` adds a `meta` block to JSON reports. Without `--json`, it prints the stage table to stderr.
+- `-v` enables `INFO` logs; `-vv` enables `DEBUG` logs. Logs go to stderr, leaving stdout for the report.
+- `--trace` writes a Chrome trace that you can open in [Perfetto](https://ui.perfetto.dev).
 
-The environment variables do the same for a library caller of
-`validate()`:
+When calling `validate()` from a library, use these environment variables:
 
 | Variable | Effect |
 |---|---|
-| `RASHID_LOG` | `debug`, `info`, `warning`, or `error`. Records at that level go to stderr. |
-| `RASHID_LOG_FILE` | Writes every record as one JSON object per line. |
-| `RASHID_TIMINGS` | `1` records stage timings. `mem` also records the tracemalloc peak. |
-| `RASHID_TRACE` | Writes a Chrome trace to the path at exit. |
+| `RASHID_LOG` | Sets the stderr log level: `debug`, `info`, `warning`, or `error`. |
+| `RASHID_LOG_FILE` | Writes every log record to a file as one JSON object per line. |
+| `RASHID_TIMINGS` | Set to `1` to record stage timings, or `mem` to also record the tracemalloc peak. |
+| `RASHID_TRACE` | Writes a Chrome trace to the specified path at exit. |
 
 ## Performance pull requests
 
-A `perf:` pull request pastes one of these in `## Verification`, before
-and after, with the scenario name and size:
+For a `perf:` pull request, include before-and-after measurements under `## Verification`. State the scenario name and size, and include at least one of:
 
-- A counter change from `--mode counts`, with the updated exact count in
-  `tests/integration/test_operation_counts.py`.
+- Operation counts from `--mode counts`, with updated expectations in `tests/integration/test_operation_counts.py`.
 - A timing block from `--mode counts` or `--mode time`.
 - An instruction count from `--mode instr`.
