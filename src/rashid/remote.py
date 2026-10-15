@@ -28,6 +28,7 @@ fetched concurrently since the documents are small and many.
 
 from __future__ import annotations
 
+import logging
 import posixpath
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
@@ -35,8 +36,10 @@ from pathlib import Path
 from typing import Protocol
 from urllib.parse import quote, urlparse
 
-from rashid import _json, _store
+from rashid import _json, _store, _trace
 from rashid.catalog import ROOT_CATALOG
+
+log = logging.getLogger(__name__)
 
 #: Documents fetched before the crawl stops enqueuing. Past this a catalog is
 #: large enough that a full remote check wants a local sync anyway, and the
@@ -171,9 +174,14 @@ def crawl(
     seen = {root}
     level = [root]
     queued_documents = 1  # documents fetched or waiting to be fetched
+    depth = 0
     while level:
+        log.debug("crawl depth %d: fetching %d document(s) under %s", depth, len(level), base)
         with ThreadPoolExecutor(max_workers=_WORKERS) as pool:
-            outcomes = list(pool.map(lambda rel: _fetch_one(fetcher, wire_url(base, rel)), level))
+            outcomes = _trace.pool_map(
+                pool, lambda rel: _fetch_one(fetcher, wire_url(base, rel)), level
+            )
+        depth += 1
         next_level: list[str] = []
         for rel, outcome in zip(level, outcomes, strict=True):
             url = wire_url(base, rel)
@@ -192,6 +200,7 @@ def crawl(
             if not rel.endswith(".json"):
                 continue
             result.documents += 1
+            _trace.count("crawl.documents")
             for follow in _follow_paths(base, rel, outcome.body):
                 if follow in seen:
                     continue

@@ -119,7 +119,8 @@ The public `rashid.api` module also provides helpers for tools that repair catal
 ## Documentation
 
 - [Rule reference](docs/rules.md) describes every validation pass, rule group, and degraded-pass code.
-- [Contributing guide](docs/contributing.md) covers development setup, tests, and repository checks.
+- [Contributing guide](https://github.com/portolan-sdi/portolan-ops/blob/main/policies/CONTRIBUTING.md) explains how to propose a change to a Portolan project.
+- [Development guide](docs/development.md) covers setup, tests, repository checks, profiling, and logs.
 - [Portolan specification](https://github.com/portolan-sdi/portolan-spec) defines the requirements that rashid implements.
 
 ## License

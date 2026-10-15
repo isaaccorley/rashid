@@ -72,3 +72,7 @@ Files between `ops-sync` markers are synced from [portolan-ops](https://github.c
 
 One canonical home per fact. If a value like a color, URL, or policy line exists in portolan-ops, link to it rather than copying it.
 <!-- ops-sync:end -->
+
+## Required reading
+
+Every agent must read the [Portolan contributing guide](https://github.com/portolan-sdi/portolan-ops/blob/main/policies/CONTRIBUTING.md) and [docs/development.md](docs/development.md) in full before any work in this repo.

@@ -150,6 +150,7 @@ source_modules = [
     "rashid.rules",
     "rashid.live",
     "rashid.api",
+    "rashid._trace",
 ]
 forbidden_modules = ["click"]
 
@@ -176,6 +177,7 @@ source_modules = [
     "rashid.live",
     "rashid.data.reader",
     "rashid.api",
+    "rashid._trace",
 ]
 forbidden_modules = ["pyarrow", "rasterio", "pyproj", "rio_cogeo", "shapely"]
 ignore_imports = ["rashid.data -> rashid.data.checks"]
@@ -196,14 +198,14 @@ changelog_file = "CHANGELOG.md"
 major_version_zero = true
 
 [tool.codespell]
-skip = ".git,uv.lock,.venv,.mypy_cache,.ruff_cache,.pytest_cache,mutants"
+skip = ".git,uv.lock,.venv,.mypy_cache,.ruff_cache,.pytest_cache,mutants,.cache"
 # "unparseable" is a valid English variant used in rule messages
 ignore-words-list = "unparseable"
 check-filenames = true
 
 [tool.vulture]
 min_confidence = 80
-paths = ["src/rashid", "tests"]
+paths = ["src/rashid", "tests", "scripts"]
 sort_by_size = true
 
 [tool.bandit]
@@ -213,7 +215,7 @@ exclude_dirs = ["tests", ".venv"]
 known_first_party = ["rashid"]
 # .claude holds Claude Code worktrees, each with its own .venv. Like mutants,
 # it is generated, not this project's dependency surface.
-exclude = [".venv", "tests", "mutants", ".claude"]
+exclude = [".venv", "tests", "mutants", ".claude", ".cache"]
 
 [tool.deptry.package_module_name_map]
 # rio-cogeo installs as the `rio_cogeo` import package.

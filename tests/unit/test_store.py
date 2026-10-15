@@ -9,7 +9,7 @@ from typing import Any
 
 import pytest
 
-from rashid import _store
+from rashid import _store, _trace
 from tests._https import HttpsServer, Route
 
 _AGENT = f"rashid/{version('rashid')} (+https://github.com/portolan-sdi/rashid)"
@@ -349,3 +349,30 @@ def test_urllib_retries_a_failed_connection(monkeypatch: pytest.MonkeyPatch) -> 
         _store.get(f"https://127.0.0.1:{port}/x.json?v=1")
     assert raised.value.status is None
     assert len(calls) == 1 + _store._RETRY["max_retries"]
+
+
+def test_counters_record_each_request_and_each_urllib_fallback(
+    https_server: HttpsServer,
+) -> None:
+    https_server.routes["/x.bin"] = Route(body=bytes(range(64)))
+    https_server.routes["/chunked.bin"] = Route(body=bytes(range(64)), length=False)
+    x, chunked = https_server.url("x.bin"), https_server.url("chunked.bin")
+
+    with _trace.counting() as delta:
+        _store.get(x)
+        _store.head_size(x)
+        _store.get_range(x, 0, 4)
+        b"".join(_store.stream(x, 16))
+    assert delta == {"http.gets": 1, "http.heads": 1, "http.ranges": 1, "http.streams": 1}
+
+    with _trace.counting() as delta:
+        assert _store.get_range(chunked, 8, 12) == bytes(range(8, 12))
+    assert delta == {"http.ranges": 1, "http.urllib_fallbacks": 1}
+
+
+def test_counters_record_urllib_retries(https_server: HttpsServer) -> None:
+    https_server.routes["/x.json?v=1"] = Route(body=b"{}", fail_first=2)
+
+    with _trace.counting() as delta:
+        assert _store.get(https_server.url("x.json?v=1")) == b"{}"
+    assert delta == {"http.gets": 1, "http.urllib_fallbacks": 1, "http.retries": 2}

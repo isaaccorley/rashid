@@ -41,6 +41,7 @@ forever reaches it.
 
 from __future__ import annotations
 
+import logging
 import re
 import ssl
 import time
@@ -63,7 +64,10 @@ import obstore
 from obstore.exceptions import InvalidPathError, NotSupportedError
 from obstore.store import HTTPStore
 
+from rashid import _trace
 from rashid._http import user_agent
+
+log = logging.getLogger(__name__)
 
 # Longest wait for the next bytes of a response, in either transport.
 _IDLE = timedelta(seconds=30)
@@ -204,6 +208,8 @@ def _send(url: str, method: str, headers: dict[str, str] | None) -> Any:
         delay = _BACKOFF * 2**attempt
         if not retry or attempt >= _RETRY["max_retries"] or time.monotonic() + delay > deadline:
             raise error from cause
+        _trace.count("http.retries")
+        log.debug("%s %s: retry %d in %.1fs after %s", method, url, attempt + 1, delay, error)
         time.sleep(delay)
         attempt += 1
 
@@ -234,20 +240,34 @@ def _urllib_get(url: str, max_bytes: int | None) -> bytes:
 
 def get(url: str, *, max_bytes: int | None = None) -> bytes:
     """The whole body of ``url``. Raises :class:`StoreError` past ``max_bytes``."""
-    located = _locate(url)
-    if located is None:
+    _trace.count("http.gets")
+    with _trace.span("http.get"):
+        located = _locate(url)
+        if located is None:
+            _fallback("GET", url, "obstore cannot request this path")
+            return _urllib_get(url, max_bytes)
+        try:
+            result = obstore.get(*located)
+            if max_bytes is not None and result.meta["size"] > max_bytes:
+                raise StoreError(f"GET {url}: body exceeds {max_bytes} bytes")
+            body = result.bytes().to_bytes()
+            log.debug("GET %s: %d bytes", url, len(body))
+            return body
+        except StoreError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - obstore raises several types; the text has the status
+            if not _urllib_can_read(exc):
+                error = _error("GET", url, exc)
+                log.debug("%s", error)
+                raise error from exc
+            _fallback("GET", url, exc)
         return _urllib_get(url, max_bytes)
-    try:
-        result = obstore.get(*located)
-        if max_bytes is not None and result.meta["size"] > max_bytes:
-            raise StoreError(f"GET {url}: body exceeds {max_bytes} bytes")
-        return result.bytes().to_bytes()
-    except StoreError:
-        raise
-    except Exception as exc:  # noqa: BLE001 - obstore raises several types; the text has the status
-        if not _urllib_can_read(exc):
-            raise _error("GET", url, exc) from exc
-    return _urllib_get(url, max_bytes)
+
+
+def _fallback(method: str, url: str, reason: object) -> None:
+    """Record that ``url`` goes out over urllib instead of obstore, and why."""
+    _trace.count("http.urllib_fallbacks")
+    log.debug("%s %s: over urllib: %s", method, url, str(reason).splitlines()[0])
 
 
 def head_size(url: str) -> int:
@@ -256,18 +276,25 @@ def head_size(url: str) -> int:
     A HEAD with no ``Content-Length`` has no size for urllib to read either,
     so only a path obstore cannot parse goes out over urllib.
     """
-    located = _locate(url)
-    if located is not None:
-        try:
-            return int(obstore.head(*located)["size"])
-        except Exception as exc:  # noqa: BLE001 - obstore raises several types; the text has the status
-            if not isinstance(exc, InvalidPathError):
-                raise _error("HEAD", url, exc) from exc
-    with _urlopen(url, "HEAD") as response:
-        length = response.headers.get("Content-Length")
-    if length is None or not length.isdigit():
-        raise StoreError(f"HEAD {url} returned no Content-Length", refused=True)
-    return int(length)
+    _trace.count("http.heads")
+    with _trace.span("http.head"):
+        located = _locate(url)
+        if located is not None:
+            try:
+                size = int(obstore.head(*located)["size"])
+                log.debug("HEAD %s: %d bytes", url, size)
+                return size
+            except Exception as exc:  # noqa: BLE001 - obstore raises several types; the text has the status
+                if not isinstance(exc, InvalidPathError):
+                    error = _error("HEAD", url, exc)
+                    log.debug("%s", error)
+                    raise error from exc
+        _fallback("HEAD", url, "obstore cannot request this path")
+        with _urlopen(url, "HEAD") as response:
+            length = response.headers.get("Content-Length")
+        if length is None or not length.isdigit():
+            raise StoreError(f"HEAD {url} returned no Content-Length", refused=True)
+        return int(length)
 
 
 def get_range(url: str, start: int, end: int) -> bytes:
@@ -277,23 +304,31 @@ def get_range(url: str, start: int, end: int) -> bytes:
     obstore refuses that answer. The object is then read whole and sliced, as
     a client without range support has to.
     """
-    located = _locate(url)
-    if located is not None:
-        try:
-            return obstore.get_range(*located, start=start, end=end).to_bytes()
-        except NotSupportedError:
-            return get(url)[start:end]
-        except Exception as exc:  # noqa: BLE001 - obstore raises several types; the text has the status
-            if not _urllib_can_read(exc):
-                raise _error("GET", url, exc) from exc
-    with _urlopen(url, "GET", {"Range": f"bytes={start}-{end - 1}"}) as response:
-        data: bytes = response.read()
-        status = response.status
-    return data[start:end] if status == 200 else data
+    _trace.count("http.ranges")
+    with _trace.span("http.range"):
+        located = _locate(url)
+        if located is not None:
+            try:
+                return obstore.get_range(*located, start=start, end=end).to_bytes()
+            except NotSupportedError:
+                log.debug("GET %s: range ignored; reading the whole object", url)
+                return get(url)[start:end]
+            except Exception as exc:  # noqa: BLE001 - obstore raises several types; the text has the status
+                if not _urllib_can_read(exc):
+                    raise _error("GET", url, exc) from exc
+                _fallback("GET", url, exc)
+        else:
+            _fallback("GET", url, "obstore cannot request this path")
+        with _urlopen(url, "GET", {"Range": f"bytes={start}-{end - 1}"}) as response:
+            data: bytes = response.read()
+            status = response.status
+        return data[start:end] if status == 200 else data
 
 
 def stream(url: str, chunk_size: int) -> Iterator[bytes]:
     """The body of ``url`` in chunks. No request leaves until iteration starts."""
+    _trace.count("http.streams")
+    log.debug("GET %s: streaming", url)
     located = _locate(url)
     if located is not None:
         try:
@@ -301,6 +336,7 @@ def stream(url: str, chunk_size: int) -> Iterator[bytes]:
         except Exception as exc:  # noqa: BLE001 - obstore raises several types; the text has the status
             if not _urllib_can_read(exc):
                 raise _error("GET", url, exc) from exc
+            _fallback("GET", url, exc)
         else:
             try:
                 for chunk in result.stream(min_chunk_size=chunk_size):
@@ -308,6 +344,8 @@ def stream(url: str, chunk_size: int) -> Iterator[bytes]:
             except Exception as exc:  # noqa: BLE001 - obstore raises several types; the text has the status
                 raise _error("GET", url, exc) from exc
             return
+    else:
+        _fallback("GET", url, "obstore cannot request this path")
     with _urlopen(url, "GET") as response:
         while chunk := response.read(chunk_size):
             yield chunk

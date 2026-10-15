@@ -23,18 +23,21 @@ same verdict on every fixture.
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable
 from dataclasses import dataclass
 from functools import lru_cache
 from importlib import resources
 from typing import TYPE_CHECKING, Any
 
-from rashid import _json
+from rashid import _json, _trace
 
 if TYPE_CHECKING:
     from importlib.abc import Traversable
 
     from referencing import Registry
+
+log = logging.getLogger(__name__)
 
 STAC_VERSION = "1.1.0"
 _STAC_HOST = "https://schemas.stacspec.org/"
@@ -67,6 +70,8 @@ def fetch_schema(schema_uri: str) -> dict[str, Any]:
 
     if not schema_uri.startswith("https://"):
         raise ValueError(f"schema URI must be an https URL, got: {schema_uri!r}")
+    _trace.count("schema.fetches")
+    log.debug("fetching schema %s", schema_uri)
     schema: dict[str, Any] = _json.loads(_store.get(schema_uri))
     return schema
 
@@ -189,9 +194,11 @@ def compile_rust(schema: dict[str, Any], registry: Any, *, draft7: bool = False)
     import jsonschema_rs
 
     build = jsonschema_rs.Draft7Validator if draft7 else jsonschema_rs.validator_for
+    _trace.count("schema.rust_compiles")
     try:
         return build(schema, registry=registry, validate_formats=False, offline=True)
-    except Exception:  # noqa: BLE001 - any compile failure falls back to jsonschema
+    except Exception as exc:  # noqa: BLE001 - any compile failure falls back to jsonschema
+        log.debug("jsonschema-rs cannot compile %s: %s", schema.get("$id", "<no $id>"), exc)
         return None
 
 
@@ -205,7 +212,9 @@ def screened(python_validator: Any, rust_validator: Any | None) -> Validator:
 
     def _validate(data: dict[str, Any]) -> list[SchemaError]:
         if rust_validator is not None and rust_validator.is_valid(data):
+            _trace.count("schema.rust_passes")
             return []
+        _trace.count("schema.python_validations")
         return [describe(error) for error in sorted(python_validator.iter_errors(data), key=str)]
 
     return _validate
