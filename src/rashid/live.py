@@ -51,6 +51,14 @@ HEADed once per distinct URL, in URL order; the same PORTO-CORE-073 host
 scoping as for assets keeps the probes off other hosts. There is no GET
 fallback on a 405: PORTO-CORE-043 makes HEAD a MUST for the publish host, so a
 host that rejects HEAD is reported, not worked around.
+
+No probe leaves https. A redirect to another https URL is followed, and the
+checks read the answer at its end. A redirect to any other scheme is not
+followed: a client that stays on https gets no object there, so the asset or
+link is reported as ``PTL-LIV-008``, with the URL the redirect names. When
+the host's first asset redirects that way, the range and CORS probes move to
+the first asset whose HEAD stays on https; when none does, ``PTL-LIV-000``
+says they did not run.
 """
 
 from __future__ import annotations
@@ -63,7 +71,7 @@ from dataclasses import dataclass
 from typing import Any, Protocol
 from urllib.error import HTTPError
 from urllib.parse import urlparse
-from urllib.request import Request, urlopen
+from urllib.request import Request
 
 from rashid import _store, _trace
 from rashid._http import user_agent
@@ -82,6 +90,7 @@ LIV_CORS_EXPOSE = "PTL-LIV-004"
 LIV_CORS_PREFLIGHT = "PTL-LIV-005"
 LIV_LINK_TARGET = "PTL-LIV-006"
 LIV_SELF_BASE = "PTL-LIV-007"
+LIV_OFF_HTTPS = "PTL-LIV-008"
 
 # Requirement IDs from the spec's requirements manifest
 # (specs/portolan/requirements.yaml) enforced by each check;
@@ -104,6 +113,11 @@ SPEC_IDS: dict[str, tuple[str, ...]] = {
     # link (081). When the caller names the publish base too, the two must
     # agree, or the publish step wrote the catalog to the wrong location.
     LIV_SELF_BASE: ("PORTO-CORE-081",),
+    # core.md, Assets: an absolute href MUST use https, because a browser
+    # cannot fetch the other schemes (023). A redirect off https moves the
+    # object to such a URL, so a link that redirects there does not resolve
+    # for an https client either (035). The 073 scoping applies as above.
+    LIV_OFF_HTTPS: ("PORTO-CORE-023", "PORTO-CORE-035", "PORTO-CORE-073"),
 }
 
 # Assets are declared on collections and items; catalogs carry none.
@@ -155,6 +169,20 @@ class ProbeResponse:
     def header(self, name: str) -> str | None:
         return self.headers.get(name.lower())
 
+    def off_https(self) -> str | None:
+        """The non-https URL this response redirects to; None for any other answer.
+
+        A redirect that stays on https is followed before a response is
+        built, so a 3xx seen here points off https or names no location. A
+        relative ``Location`` keeps the request's https scheme.
+        """
+        if not 300 <= self.status < 400:
+            return None
+        location = self.header("location")
+        if location is None or urlparse(location).scheme.lower() in ("", "https"):
+            return None
+        return location
+
 
 class Prober(Protocol):
     """Issues the three probe requests against one URL.
@@ -199,6 +227,15 @@ def _lower_headers(items: Any) -> dict[str, str]:
     return {str(name).lower(): str(value) for name, value in items}
 
 
+def _open(request: Request) -> Any:
+    """Send ``request`` through ``rashid._store``'s probe opener.
+
+    It reads the same TLS options as every other transport, and it answers a
+    redirect off https as the 3xx it is instead of following it.
+    """
+    return _store.probe_opener().open(request, timeout=_TIMEOUT)
+
+
 def _request(url: str, method: str, headers: dict[str, str]) -> ProbeResponse:
     if urlparse(url).scheme.lower() != "https":
         raise ValueError(f"refusing to probe non-https URL: {url!r}")
@@ -206,15 +243,17 @@ def _request(url: str, method: str, headers: dict[str, str]) -> ProbeResponse:
     # here, so setting the agent once covers all of them.
     request = Request(url, method=method, headers={"User-Agent": user_agent(), **headers})
     try:
-        with urlopen(request, timeout=_TIMEOUT) as response:  # noqa: S310  # nosec B310
+        with _open(request) as response:
             return ProbeResponse(
                 status=response.status, headers=_lower_headers(response.headers.items())
             )
     except HTTPError as exc:
-        # A 4xx/5xx still carries the verdict (e.g. a rejected preflight):
-        # report its status and headers rather than treating it as transport
-        # failure — only network-level errors propagate.
-        return ProbeResponse(status=exc.code, headers=_lower_headers(exc.headers.items()))
+        # A 4xx/5xx still carries the verdict (e.g. a rejected preflight), and
+        # a redirect off https carries the URL it names: report the status and
+        # headers rather than treating them as a transport failure. Only
+        # network-level errors propagate.
+        with exc:
+            return ProbeResponse(status=exc.code, headers=_lower_headers(exc.headers.items()))
 
 
 class _DefaultProber:
@@ -228,7 +267,8 @@ class _DefaultProber:
     When the host answers but obstore does not return the answer, the HEAD is
     sent again over urllib, so the checks read the full response exactly as
     before. That covers a non-2xx status, whose headers ``_check_head`` still
-    reads, a missing ``Content-Length``, and a redirect off https. A transport
+    reads, a missing ``Content-Length``, and a redirect off https, which comes
+    back as the 3xx itself and is never followed. A transport
     failure is not sent again: it marks the host dead, and asking twice only
     doubles the wait.
     """
@@ -385,6 +425,22 @@ def _server_finding(
         fix_hint=fix_hint,
         expected=expected,
         actual=actual,
+    )
+
+
+def _off_https_finding(
+    node: Node, pointer: str, subject: str, probe: str, url: str, location: str
+) -> Finding:
+    return Finding(
+        rule_id=LIV_OFF_HTTPS,
+        severity=Severity.ERROR,
+        message=f"{subject}: {probe} {url} redirected off https to {location}",
+        path=str(node.path),
+        object_id=node.id,
+        json_pointer=pointer,
+        fix_hint="serve the object over https, and redirect only to https URLs",
+        expected="https",
+        actual=location,
     )
 
 
@@ -579,6 +635,10 @@ class _HeadCache:
         self.failed[host] = error
         return None
 
+    def response(self, url: str) -> ProbeResponse | None:
+        """The HEAD response already held for ``url``, without sending one."""
+        return self._responses.get(url)
+
     def status(self, url: str) -> int | None:
         """The status the host answers for ``url``; None once the host failed."""
         known = self._known.get(url)
@@ -593,12 +653,19 @@ def _unavailable(message: str, path: str) -> Finding:
     return Finding(rule_id=LIV_UNAVAILABLE, severity=Severity.WARNING, message=message, path=path)
 
 
-def _check_heads(host: str, targets: list[_Target], heads: _HeadCache) -> list[Finding]:
+def _check_heads(
+    host: str, targets: list[_Target], heads: _HeadCache, reported: _Target | None = None
+) -> list[Finding]:
     """HEAD each distinct URL once, but check EVERY target against it.
 
     Two assets may share one URL while disagreeing on ``file:size`` — at most
     one of them can be right, so the response is cached per URL and the check
     still runs per asset.
+
+    A HEAD that redirects off https is ``PTL-LIV-008`` for that asset, and its
+    length is not checked: the 3xx carries the redirect's length, not the
+    object's. ``reported`` is the asset whose redirect the ranged GET already
+    reported, so its HEAD adds no second finding.
     """
     heads.prefetch(host, [target.url for target in targets])
     findings: list[Finding] = []
@@ -612,15 +679,28 @@ def _check_heads(host: str, targets: list[_Target], heads: _HeadCache) -> list[F
                 )
             )
             break
-        findings.extend(_check_head(target, response))
+        location = response.off_https()
+        if location is None:
+            findings.extend(_check_head(target, response))
+        elif target is not reported:
+            findings.append(
+                _off_https_finding(
+                    target.node,
+                    f"/assets/{target.key}/href",
+                    f"asset '{target.key}'",
+                    "HEAD",
+                    target.url,
+                    location,
+                )
+            )
     return findings
 
 
-def _check_host(
-    host: str, targets: list[_Target], prober: Prober, heads: _HeadCache
-) -> list[Finding]:
-    rep = targets[0]
-    log.debug("probing host %s: %d target(s), range and CORS via %s", host, len(targets), rep.url)
+def _probe_host(
+    host: str, rep: _Target, prober: Prober, heads: _HeadCache
+) -> tuple[ProbeResponse, ProbeResponse] | Finding:
+    """The ranged GET and the preflight of ``rep``, or the warning that the host failed."""
+    log.debug("probing host %s: range and CORS via %s", host, rep.url)
     try:
         _trace.count("live.range_probes")
         ranged = prober.get_range(rep.url)
@@ -629,14 +709,84 @@ def _check_host(
     except Exception as exc:  # noqa: BLE001 - an unreachable host is reported once
         log.debug("host %s failed: %s", host, exc)
         heads.failed.setdefault(host, exc)
-        return [
-            _unavailable(f"live probes against host '{host}' failed: {exc}", str(rep.node.path))
-        ]
+        return _unavailable(f"live probes against host '{host}' failed: {exc}", str(rep.node.path))
+    return ranged, preflighted
+
+
+def _check_server(
+    host: str, rep: _Target, ranged: ProbeResponse, preflighted: ProbeResponse
+) -> list[Finding]:
+    """The host-level range and CORS checks, read off ``rep``'s two probes."""
     findings = _check_range(host, rep, ranged)
     findings.extend(_check_cors(host, rep, ranged))
     findings.extend(_check_preflight(host, rep, preflighted))
-    findings.extend(_check_heads(host, targets, heads))
     return findings
+
+
+def _ranged_off_https(rep: _Target, location: str) -> Finding:
+    return _off_https_finding(
+        rep.node,
+        f"/assets/{rep.key}/href",
+        f"asset '{rep.key}'",
+        "a ranged GET of",
+        rep.url,
+        location,
+    )
+
+
+def _check_host(
+    host: str, targets: list[_Target], prober: Prober, heads: _HeadCache
+) -> list[Finding]:
+    """Range and CORS once per host, through one representative asset; then every HEAD.
+
+    The representative is the host's first asset. When its ranged GET
+    redirects off https, the 3xx says nothing about range or CORS support, so
+    the redirect is reported and the HEADs pick the next representative: the
+    first asset at another URL whose HEAD stays on https. When no asset
+    qualifies, or its ranged GET redirects off https too, ``PTL-LIV-000``
+    says the host-level checks did not run.
+    """
+    first = targets[0]
+    log.debug("probing host %s: %d target(s)", host, len(targets))
+    probed = _probe_host(host, first, prober, heads)
+    if isinstance(probed, Finding):
+        return [probed]
+    ranged, preflighted = probed
+    location = ranged.off_https()
+    if location is None:
+        findings = _check_server(host, first, ranged, preflighted)
+        findings.extend(_check_heads(host, targets, heads))
+        return findings
+    findings = [_ranged_off_https(first, location)]
+    head_findings = _check_heads(host, targets, heads, reported=first)
+    if host in heads.failed:
+        return findings + head_findings
+    rep = next((t for t in targets if t.url != first.url and _stays_on_https(heads, t.url)), None)
+    skipped = "every asset on it redirects off https"
+    if rep is not None:
+        probed = _probe_host(host, rep, prober, heads)
+        if isinstance(probed, Finding):
+            return [*findings, probed, *head_findings]
+        ranged, preflighted = probed
+        location = ranged.off_https()
+        if location is None:
+            findings.extend(_check_server(host, rep, ranged, preflighted))
+            return findings + head_findings
+        findings.append(_ranged_off_https(rep, location))
+        skipped = "the ranged GET of every asset tried redirects off https"
+    findings.append(
+        _unavailable(
+            f"range and CORS probes against host '{host}' did not run: {skipped}",
+            str(first.node.path),
+        )
+    )
+    return findings + head_findings
+
+
+def _stays_on_https(heads: _HeadCache, url: str) -> bool:
+    """Whether the HEAD already held for ``url`` answered without a redirect off https."""
+    response = heads.response(url)
+    return response is not None and response.off_https() is None
 
 
 def _check_links(host: str, targets: list[_LinkTarget], heads: _HeadCache) -> list[Finding]:
@@ -662,6 +812,20 @@ def _check_links(host: str, targets: list[_LinkTarget], heads: _HeadCache) -> li
             )
             break
         if 200 <= status < 300:
+            continue
+        held = heads.response(target.url)
+        location = None if held is None else held.off_https()
+        if location is not None:
+            findings.append(
+                _off_https_finding(
+                    target.node,
+                    f"/links/{target.index}/href",
+                    f"link rel:{target.rel!r} href '{target.href}'",
+                    "HEAD",
+                    target.url,
+                    location,
+                )
+            )
             continue
         findings.append(
             Finding(

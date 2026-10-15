@@ -30,7 +30,9 @@ A :class:`StoreError` with ``refused`` set means the server answered but the
 answer was not one rashid accepts: a redirect off https, or a HEAD with no
 ``Content-Length``. urllib cannot do better with either, so neither is sent
 again here; the live prober, which reads such an answer anyway, sends it again
-itself.
+itself through :func:`probe_opener`. That opener does not follow a redirect
+off https either. It returns the redirect as the answer, so the prober can
+report where it points.
 
 Timeouts: ``read_timeout`` bounds each wait for bytes, as urllib's socket
 timeout does, so a stalled server fails in 30 s while a large asset that keeps
@@ -121,6 +123,7 @@ def reset() -> None:
     """Drop every cached client, so the next request reads ``CLIENT_OPTIONS`` again."""
     _store.cache_clear()
     _opener.cache_clear()
+    probe_opener.cache_clear()
 
 
 def _locate(url: str) -> tuple[HTTPStore, str] | None:
@@ -177,13 +180,43 @@ class _HttpsOnlyRedirects(HTTPRedirectHandler):
         return super().redirect_request(req, fp, code, msg, headers, newurl)
 
 
-@cache
-def _opener() -> OpenerDirector:
+class _AnswerOffHttpsRedirects(HTTPRedirectHandler):
+    """Follow a redirect to another https URL; answer one off https as it came.
+
+    Returning None makes urllib raise the redirect as an ``HTTPError``, with
+    its status and its ``Location`` header, and send nothing to the new URL.
+    """
+
+    def redirect_request(
+        self, req: Request, fp: Any, code: int, msg: str, headers: Any, newurl: str
+    ) -> Request | None:
+        if urlsplit(newurl).scheme.lower() != "https":
+            return None
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+def _context() -> ssl.SSLContext:
     context = ssl.create_default_context()
     if CLIENT_OPTIONS.get("allow_invalid_certificates"):
         context.check_hostname = False
         context.verify_mode = ssl.CERT_NONE
-    return build_opener(_HttpsOnlyRedirects(), HTTPSHandler(context=context))
+    return context
+
+
+@cache
+def _opener() -> OpenerDirector:
+    return build_opener(_HttpsOnlyRedirects(), HTTPSHandler(context=_context()))
+
+
+@cache
+def probe_opener() -> OpenerDirector:
+    """The live prober's urllib opener: the same TLS options, and no step off https.
+
+    A redirect to another https URL is followed. A redirect off https is the
+    answer: ``open`` raises it as an ``HTTPError`` that carries the status and
+    the ``Location``, and no request goes to the http URL.
+    """
+    return build_opener(_AnswerOffHttpsRedirects(), HTTPSHandler(context=_context()))
 
 
 def _send(url: str, method: str, headers: dict[str, str] | None) -> Any:

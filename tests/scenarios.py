@@ -24,18 +24,15 @@ catalog or stays flat.
 
 from __future__ import annotations
 
-import functools
 import hashlib
 import random
 import shutil
-import ssl
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import date, timedelta
 from pathlib import Path
 from typing import Any
-from unittest import mock
 
 from tests.conftest import CatalogBuilder, mutate_json
 
@@ -201,9 +198,8 @@ def target(name: str, size: str, seed: int = 0, cache_dir: Path | None = None) -
     """Build or reuse the scenario, and yield what to pass to ``rashid.validate``.
 
     For ``remote`` the tree is served over a local HTTPS server until the
-    block ends. The live pass sends its range and CORS probes over urllib,
-    which does not read ``rashid._store``'s certificate option, so those
-    probes get an unverified TLS context for the duration.
+    block ends. Every transport, the live probes included, reads
+    ``rashid._store``'s certificate option, which the server sets.
     """
     root = cached(name, size, seed, cache_dir)
     if name == "metadata":
@@ -214,17 +210,10 @@ def target(name: str, size: str, seed: int = 0, cache_dir: Path | None = None) -
         return
     from tests._https import Route, serving
 
-    unverified = ssl.create_default_context()
-    unverified.check_hostname = False
-    unverified.verify_mode = ssl.CERT_NONE
-    import rashid.live
-
     with serving() as server:
         for path in sorted(p for p in root.rglob("*") if p.is_file()):
             server.routes["/" + path.relative_to(root).as_posix()] = Route(body=path.read_bytes())
-        probe = functools.partial(rashid.live.urlopen, context=unverified)
-        with mock.patch.object(rashid.live, "urlopen", probe):
-            yield Target(server.url("catalog.json"), {"data": False, "live": True})
+        yield Target(server.url("catalog.json"), {"data": False, "live": True})
 
 
 def describe() -> str:

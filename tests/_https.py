@@ -105,6 +105,9 @@ def _handler(server: HttpsServer) -> type[BaseHTTPRequestHandler]:
         def do_HEAD(self) -> None:
             self._answer(False)
 
+        def do_OPTIONS(self) -> None:
+            self._answer(False)
+
     return Handler
 
 

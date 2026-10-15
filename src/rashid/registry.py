@@ -210,6 +210,10 @@ _PASS_CHECKS: dict[str, tuple[Severity, str]] = {
         Severity.WARNING,
         "the root self link names the base the catalog is published under",
     ),
+    "PTL-LIV-008": (
+        Severity.ERROR,
+        "no asset or link target on the probed hosts redirects off https",
+    ),
 }
 
 # The pass modules that declare a SPEC_IDS registry.

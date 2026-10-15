@@ -9,6 +9,9 @@ from __future__ import annotations
 
 import re
 import socket
+import threading
+from collections.abc import Iterator
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from importlib.metadata import version
 from pathlib import Path, PurePosixPath
 from typing import Any
@@ -25,6 +28,7 @@ from rashid.live import (
     LIV_CORS_PREFLIGHT,
     LIV_HEAD_LENGTH,
     LIV_LINK_TARGET,
+    LIV_OFF_HTTPS,
     LIV_RANGE,
     LIV_SELF_BASE,
     LIV_UNAVAILABLE,
@@ -481,6 +485,7 @@ def test_disabling_all_liv_rules_skips_pass(catalog: CatalogBuilder) -> None:
                 LIV_CORS_PREFLIGHT,
                 LIV_LINK_TARGET,
                 LIV_SELF_BASE,
+                LIV_OFF_HTTPS,
             }
         )
     )
@@ -1092,12 +1097,12 @@ def test_runner_reports_self_base_and_it_can_be_disabled(catalog: CatalogBuilder
 #
 # The fake prober above never builds a Request, so a missing or malformed
 # User-Agent is invisible to every test that uses it. These drive the real
-# _DefaultProber against a recording urlopen instead (#64). Its HEAD goes to
+# _DefaultProber against a recording opener instead (#64). Its HEAD goes to
 # obstore first, so _record makes obstore fail and the HEAD falls back.
 
 
 class _RecordedResponse:
-    """The bare surface ``_request`` reads off a urlopen result."""
+    """The bare surface ``_request`` reads off an opened response."""
 
     status = 200
     headers: dict[str, str] = {}
@@ -1110,11 +1115,11 @@ class _RecordedResponse:
 
 
 def _recorder(requests: list[Request]) -> Any:
-    def fake_urlopen(request: Request, **_kwargs: Any) -> _RecordedResponse:
+    def fake_open(request: Request) -> _RecordedResponse:
         requests.append(request)
         return _RecordedResponse()
 
-    return fake_urlopen
+    return fake_open
 
 
 def _store_fails(url: str) -> int:
@@ -1122,9 +1127,9 @@ def _store_fails(url: str) -> int:
 
 
 def _record(monkeypatch: pytest.MonkeyPatch, probe: str) -> Request:
-    """Run one probe kind against a recording urlopen and return its Request."""
+    """Run one probe kind against a recording opener and return its Request."""
     requests: list[Request] = []
-    monkeypatch.setattr(live_mod, "urlopen", _recorder(requests))
+    monkeypatch.setattr(live_mod, "_open", _recorder(requests))
     monkeypatch.setattr(live_mod._store, "head_size", _store_fails)
     getattr(_DefaultProber(), probe)(_URL)
     (request,) = requests
@@ -1196,7 +1201,7 @@ def test_default_head_falls_back_to_urllib(
 
     requests: list[Request] = []
     monkeypatch.setattr(live_mod._store, "head_size", fail)
-    monkeypatch.setattr(live_mod, "urlopen", _recorder(requests))
+    monkeypatch.setattr(live_mod, "_open", _recorder(requests))
 
     response = _DefaultProber().head(_URL)
 
@@ -1214,7 +1219,7 @@ def test_default_head_does_not_ask_a_dead_host_twice(monkeypatch: pytest.MonkeyP
 
     requests: list[Request] = []
     monkeypatch.setattr(live_mod._store, "head_size", fail)
-    monkeypatch.setattr(live_mod, "urlopen", _recorder(requests))
+    monkeypatch.setattr(live_mod, "_open", _recorder(requests))
 
     with pytest.raises(_store.StoreError) as raised:
         _DefaultProber().head(_URL)
@@ -1287,3 +1292,255 @@ def test_the_first_head_on_a_host_goes_alone(catalog: CatalogBuilder) -> None:
 
     assert prober.head_calls == ["https://data.example.org/0.parquet"]
     assert _ids(findings) == [LIV_UNAVAILABLE]
+
+
+# --- a redirect off https is reported, never followed (#226) ----------------
+#
+# The defect these guard: urllib's default opener follows a redirect from
+# https to plain http. The probe then sent a plain-text request to the host the
+# redirect named, and the live pass reported that answer as the asset's.
+
+
+class _PlainHttp:
+    """A plain-http server that records the path of every request it gets."""
+
+    def __init__(self) -> None:
+        self.hits: list[str] = []
+        hits = self.hits
+
+        class Handler(BaseHTTPRequestHandler):
+            def log_message(self, *_args: object) -> None:
+                return None
+
+            def _answer(self) -> None:
+                hits.append(self.path)
+                self.send_response(200)
+                self.send_header("Content-Length", "1")
+                self.send_header("Accept-Ranges", "bytes")
+                self.end_headers()
+                if self.command != "HEAD":
+                    self.wfile.write(b"x")
+
+            do_GET = do_HEAD = do_OPTIONS = _answer
+
+        self._httpd = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self.url = f"http://127.0.0.1:{self._httpd.server_address[1]}"
+        self._thread = threading.Thread(target=self._httpd.serve_forever, args=(0.02,), daemon=True)
+
+    def __enter__(self) -> _PlainHttp:
+        self._thread.start()
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        self._httpd.shutdown()
+        self._httpd.server_close()
+
+
+@pytest.fixture
+def plain_http() -> Iterator[_PlainHttp]:
+    with _PlainHttp() as server:
+        yield server
+
+
+def _off_https(https_server: HttpsServer, plain_http: _PlainHttp, path: str) -> str:
+    """Route ``path`` on the https server to a 302 that points at the http server."""
+    target = f"{plain_http.url}/moved.bin"
+    https_server.routes[path] = Route(status=302, headers={"Location": target})
+    return target
+
+
+@pytest.mark.parametrize("probe", ["get_range", "head", "preflight"])
+def test_a_probe_answers_a_redirect_off_https_and_sends_nothing_to_http(
+    https_server: HttpsServer, plain_http: _PlainHttp, probe: str
+) -> None:
+    target = _off_https(https_server, plain_http, "/x.bin")
+
+    response = getattr(_DefaultProber(), probe)(https_server.url("x.bin"))
+
+    assert response.status == 302
+    assert response.off_https() == target
+    assert plain_http.hits == []
+
+
+def test_a_redirect_that_stays_on_https_is_followed_with_its_headers(
+    https_server: HttpsServer,
+) -> None:
+    https_server.routes["/old.bin"] = Route(status=301, headers={"Location": "/new.bin"})
+    https_server.routes["/new.bin"] = Route(body=b"abc", headers={"Accept-Ranges": "bytes"})
+
+    response = _DefaultProber().get_range(https_server.url("old.bin"))
+
+    assert response.status == 206
+    assert response.header("accept-ranges") == "bytes"
+    assert response.off_https() is None
+    assert [s.path for s in https_server.seen] == ["/old.bin", "/new.bin"]
+
+
+def test_live_pass_reports_an_asset_that_redirects_off_https(
+    catalog: CatalogBuilder, https_server: HttpsServer, plain_http: _PlainHttp
+) -> None:
+    """The real prober end to end: one PTL-LIV-008 per asset, no plain-http request."""
+    target = _off_https(https_server, plain_http, "/a.bin")
+    _off_https(https_server, plain_http, "/b.bin")
+    https_server.routes["/c.bin"] = Route(body=b"x" * 1234)
+    catalog.collection(
+        "roads",
+        assets={
+            key: _remote_asset(https_server.url(f"{key}.bin"), size=1234) for key in ("a", "b", "c")
+        },
+    )
+
+    findings = validate_live(CatalogGraph.load(catalog.write()), _DefaultProber())
+
+    redirects = [f for f in findings if f.rule_id == LIV_OFF_HTTPS]
+    assert [f.json_pointer for f in redirects] == ["/assets/a/href", "/assets/b/href"]
+    assert all(f.severity is Severity.ERROR for f in redirects)
+    assert redirects[0].actual == target
+    assert target in redirects[0].message
+    # Asset c answers its own HEAD with the declared size, so it passes.
+    assert LIV_HEAD_LENGTH not in _ids(findings)
+    assert plain_http.hits == []
+
+
+def test_a_ranged_get_off_https_skips_the_range_and_cors_checks(catalog: CatalogBuilder) -> None:
+    graph = _graph_with_remote(catalog)
+    moved = ProbeResponse(status=302, headers={"location": "http://data.example.com/moved"})
+    prober = FakeProber(range_response=moved, head_response=moved, preflight_response=moved)
+
+    findings = validate_live(graph, prober)
+
+    # The ranged GET and the HEAD of the one asset redirect: one finding, not
+    # two. No other asset can stand in, so a warning says the host checks did
+    # not run.
+    assert _ids(findings) == [LIV_OFF_HTTPS, LIV_UNAVAILABLE]
+    assert "a ranged GET of" in findings[0].message
+    assert "did not run: every asset on it redirects off https" in findings[1].message
+
+
+def test_a_head_off_https_is_reported_instead_of_its_length(catalog: CatalogBuilder) -> None:
+    graph = _graph_with_remote(catalog)
+    moved = ProbeResponse(
+        status=301, headers={"location": "http://data.example.com/moved", "content-length": "0"}
+    )
+
+    findings = validate_live(graph, FakeProber(head_response=moved))
+
+    assert _ids(findings) == [LIV_OFF_HTTPS]
+    assert findings[0].json_pointer == "/assets/data/href"
+    assert "HEAD" in findings[0].message
+
+
+def test_a_link_target_off_https_is_reported_as_the_redirect(catalog: CatalogBuilder) -> None:
+    graph = _nested_tree(catalog)
+    moved = f"{_BASE}/sector-1/catalog.json"
+
+    class RedirectingProber(StatusProber):
+        def head(self, url: str) -> ProbeResponse:
+            if url == moved:
+                self.head_calls.append(url)
+                return ProbeResponse(
+                    status=302, headers={"location": "http://data.example.org/c.json"}
+                )
+            return super().head(url)
+
+    findings = validate_live(graph, RedirectingProber(), base_url=_BASE)
+
+    assert _link_findings(findings) == []
+    [finding] = [f for f in findings if f.rule_id == LIV_OFF_HTTPS]
+    index = _link_index(graph, "catalog.json", "child", "./sector-1/catalog.json")
+    assert finding.json_pointer == f"/links/{index}/href"
+    assert finding.actual == "http://data.example.org/c.json"
+
+
+@pytest.mark.parametrize(
+    ("status", "headers"),
+    [
+        (302, {"location": "https://elsewhere.example.org/x"}),
+        (302, {"location": "/relative/x"}),
+        (304, {}),
+        (200, {"location": "http://data.example.org/x"}),
+    ],
+    ids=["https-location", "relative-location", "no-location", "not-a-redirect"],
+)
+def test_only_a_redirect_to_another_scheme_is_off_https(
+    status: int, headers: dict[str, str]
+) -> None:
+    assert ProbeResponse(status=status, headers=headers).off_https() is None
+
+
+_MOVED = ProbeResponse(status=302, headers={"location": "http://data.example.com/moved"})
+
+
+class _PerUrlProber(FakeProber):
+    """FakeProber whose answers for the URLs in ``moved`` redirect off https."""
+
+    def __init__(self, moved: set[str], range_moved: set[str] = frozenset(), **kw: Any) -> None:
+        super().__init__(**kw)
+        self.moved = moved
+        self.range_moved = moved | range_moved
+
+    def get_range(self, url: str) -> ProbeResponse:
+        self.range_calls.append(url)
+        return _MOVED if url in self.range_moved else self.range_response
+
+    def head(self, url: str) -> ProbeResponse:
+        self.head_calls.append(url)
+        return _MOVED if url in self.moved else self.head_response
+
+    def preflight(self, url: str) -> ProbeResponse:
+        self.preflight_calls.append(url)
+        return _MOVED if url in self.range_moved else self.preflight_response
+
+
+def _two_assets(catalog: CatalogBuilder) -> tuple[CatalogGraph, str, str]:
+    first, second = "https://data.example.com/a.parquet", "https://data.example.com/b.parquet"
+    catalog.collection("roads", assets={"a": _remote_asset(first), "b": _remote_asset(second)})
+    return CatalogGraph.load(catalog.write()), first, second
+
+
+def test_the_next_asset_stands_in_when_the_first_redirects_off_https(
+    catalog: CatalogBuilder,
+) -> None:
+    graph, first, second = _two_assets(catalog)
+    no_cors = _good_range()
+    del no_cors.headers["access-control-allow-origin"]
+    prober = _PerUrlProber({first}, range_response=no_cors)
+
+    findings = validate_live(graph, prober)
+
+    assert prober.range_calls == [first, second]
+    assert prober.preflight_calls == [first, second]
+    assert _ids(findings) == [LIV_OFF_HTTPS, LIV_CORS_ORIGIN]
+    assert findings[0].json_pointer == "/assets/a/href"
+    assert findings[1].json_pointer == "/assets/b/href"
+
+
+def test_every_asset_off_https_warns_that_the_host_checks_did_not_run(
+    catalog: CatalogBuilder,
+) -> None:
+    graph, first, second = _two_assets(catalog)
+    prober = _PerUrlProber({first, second})
+
+    findings = validate_live(graph, prober)
+
+    # No stand-in qualifies, so no second ranged GET goes out.
+    assert prober.range_calls == [first]
+    assert _ids(findings) == [LIV_OFF_HTTPS, LIV_UNAVAILABLE, LIV_OFF_HTTPS]
+    assert [f.json_pointer for f in findings if f.rule_id == LIV_OFF_HTTPS] == [
+        "/assets/a/href",
+        "/assets/b/href",
+    ]
+
+
+def test_a_stand_in_whose_ranged_get_redirects_too_is_reported_and_warned(
+    catalog: CatalogBuilder,
+) -> None:
+    graph, first, second = _two_assets(catalog)
+    # b answers its HEAD in place, but its ranged GET redirects off https.
+    prober = _PerUrlProber({first}, range_moved={second})
+
+    findings = validate_live(graph, prober)
+
+    assert prober.range_calls == [first, second]
+    assert _ids(findings) == [LIV_OFF_HTTPS, LIV_OFF_HTTPS, LIV_UNAVAILABLE]
+    assert "every asset tried" in findings[2].message
