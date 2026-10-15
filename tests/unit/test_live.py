@@ -1409,9 +1409,12 @@ def test_a_ranged_get_off_https_skips_the_range_and_cors_checks(catalog: Catalog
 
     findings = validate_live(graph, prober)
 
-    # The ranged GET and the HEAD of the one asset redirect: one finding, not two.
-    assert _ids(findings) == [LIV_OFF_HTTPS]
+    # The ranged GET and the HEAD of the one asset redirect: one finding, not
+    # two. No other asset can stand in, so a warning says the host checks did
+    # not run.
+    assert _ids(findings) == [LIV_OFF_HTTPS, LIV_UNAVAILABLE]
     assert "a ranged GET of" in findings[0].message
+    assert "did not run: every asset on it redirects off https" in findings[1].message
 
 
 def test_a_head_off_https_is_reported_instead_of_its_length(catalog: CatalogBuilder) -> None:
@@ -1463,3 +1466,81 @@ def test_only_a_redirect_to_another_scheme_is_off_https(
     status: int, headers: dict[str, str]
 ) -> None:
     assert ProbeResponse(status=status, headers=headers).off_https() is None
+
+
+_MOVED = ProbeResponse(status=302, headers={"location": "http://data.example.com/moved"})
+
+
+class _PerUrlProber(FakeProber):
+    """FakeProber whose answers for the URLs in ``moved`` redirect off https."""
+
+    def __init__(self, moved: set[str], range_moved: set[str] = frozenset(), **kw: Any) -> None:
+        super().__init__(**kw)
+        self.moved = moved
+        self.range_moved = moved | range_moved
+
+    def get_range(self, url: str) -> ProbeResponse:
+        self.range_calls.append(url)
+        return _MOVED if url in self.range_moved else self.range_response
+
+    def head(self, url: str) -> ProbeResponse:
+        self.head_calls.append(url)
+        return _MOVED if url in self.moved else self.head_response
+
+    def preflight(self, url: str) -> ProbeResponse:
+        self.preflight_calls.append(url)
+        return _MOVED if url in self.range_moved else self.preflight_response
+
+
+def _two_assets(catalog: CatalogBuilder) -> tuple[CatalogGraph, str, str]:
+    first, second = "https://data.example.com/a.parquet", "https://data.example.com/b.parquet"
+    catalog.collection("roads", assets={"a": _remote_asset(first), "b": _remote_asset(second)})
+    return CatalogGraph.load(catalog.write()), first, second
+
+
+def test_the_next_asset_stands_in_when_the_first_redirects_off_https(
+    catalog: CatalogBuilder,
+) -> None:
+    graph, first, second = _two_assets(catalog)
+    no_cors = _good_range()
+    del no_cors.headers["access-control-allow-origin"]
+    prober = _PerUrlProber({first}, range_response=no_cors)
+
+    findings = validate_live(graph, prober)
+
+    assert prober.range_calls == [first, second]
+    assert prober.preflight_calls == [first, second]
+    assert _ids(findings) == [LIV_OFF_HTTPS, LIV_CORS_ORIGIN]
+    assert findings[0].json_pointer == "/assets/a/href"
+    assert findings[1].json_pointer == "/assets/b/href"
+
+
+def test_every_asset_off_https_warns_that_the_host_checks_did_not_run(
+    catalog: CatalogBuilder,
+) -> None:
+    graph, first, second = _two_assets(catalog)
+    prober = _PerUrlProber({first, second})
+
+    findings = validate_live(graph, prober)
+
+    # No stand-in qualifies, so no second ranged GET goes out.
+    assert prober.range_calls == [first]
+    assert _ids(findings) == [LIV_OFF_HTTPS, LIV_UNAVAILABLE, LIV_OFF_HTTPS]
+    assert [f.json_pointer for f in findings if f.rule_id == LIV_OFF_HTTPS] == [
+        "/assets/a/href",
+        "/assets/b/href",
+    ]
+
+
+def test_a_stand_in_whose_ranged_get_redirects_too_is_reported_and_warned(
+    catalog: CatalogBuilder,
+) -> None:
+    graph, first, second = _two_assets(catalog)
+    # b answers its HEAD in place, but its ranged GET redirects off https.
+    prober = _PerUrlProber({first}, range_moved={second})
+
+    findings = validate_live(graph, prober)
+
+    assert prober.range_calls == [first, second]
+    assert _ids(findings) == [LIV_OFF_HTTPS, LIV_OFF_HTTPS, LIV_UNAVAILABLE]
+    assert "every asset tried" in findings[2].message

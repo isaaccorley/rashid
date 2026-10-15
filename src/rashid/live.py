@@ -55,7 +55,10 @@ host that rejects HEAD is reported, not worked around.
 No probe leaves https. A redirect to another https URL is followed, and the
 checks read the answer at its end. A redirect to any other scheme is not
 followed: a client that stays on https gets no object there, so the asset or
-link is reported as ``PTL-LIV-008``, with the URL the redirect names.
+link is reported as ``PTL-LIV-008``, with the URL the redirect names. When
+the host's first asset redirects that way, the range and CORS probes move to
+the first asset whose HEAD stays on https; when none does, ``PTL-LIV-000``
+says they did not run.
 """
 
 from __future__ import annotations
@@ -693,11 +696,11 @@ def _check_heads(
     return findings
 
 
-def _check_host(
-    host: str, targets: list[_Target], prober: Prober, heads: _HeadCache
-) -> list[Finding]:
-    rep = targets[0]
-    log.debug("probing host %s: %d target(s), range and CORS via %s", host, len(targets), rep.url)
+def _probe_host(
+    host: str, rep: _Target, prober: Prober, heads: _HeadCache
+) -> tuple[ProbeResponse, ProbeResponse] | Finding:
+    """The ranged GET and the preflight of ``rep``, or the warning that the host failed."""
+    log.debug("probing host %s: range and CORS via %s", host, rep.url)
     try:
         _trace.count("live.range_probes")
         ranged = prober.get_range(rep.url)
@@ -706,31 +709,84 @@ def _check_host(
     except Exception as exc:  # noqa: BLE001 - an unreachable host is reported once
         log.debug("host %s failed: %s", host, exc)
         heads.failed.setdefault(host, exc)
-        return [
-            _unavailable(f"live probes against host '{host}' failed: {exc}", str(rep.node.path))
-        ]
-    location = ranged.off_https()
-    if location is not None:
-        # The redirect answered in place of the object, so its headers say
-        # nothing about range or CORS support. Report the redirect once,
-        # then check the HEADs, which may still reach other assets.
-        findings = [
-            _off_https_finding(
-                rep.node,
-                f"/assets/{rep.key}/href",
-                f"asset '{rep.key}'",
-                "a ranged GET of",
-                rep.url,
-                location,
-            )
-        ]
-        findings.extend(_check_heads(host, targets, heads, reported=rep))
-        return findings
+        return _unavailable(f"live probes against host '{host}' failed: {exc}", str(rep.node.path))
+    return ranged, preflighted
+
+
+def _check_server(
+    host: str, rep: _Target, ranged: ProbeResponse, preflighted: ProbeResponse
+) -> list[Finding]:
+    """The host-level range and CORS checks, read off ``rep``'s two probes."""
     findings = _check_range(host, rep, ranged)
     findings.extend(_check_cors(host, rep, ranged))
     findings.extend(_check_preflight(host, rep, preflighted))
-    findings.extend(_check_heads(host, targets, heads))
     return findings
+
+
+def _ranged_off_https(rep: _Target, location: str) -> Finding:
+    return _off_https_finding(
+        rep.node,
+        f"/assets/{rep.key}/href",
+        f"asset '{rep.key}'",
+        "a ranged GET of",
+        rep.url,
+        location,
+    )
+
+
+def _check_host(
+    host: str, targets: list[_Target], prober: Prober, heads: _HeadCache
+) -> list[Finding]:
+    """Range and CORS once per host, through one representative asset; then every HEAD.
+
+    The representative is the host's first asset. When its ranged GET
+    redirects off https, the 3xx says nothing about range or CORS support, so
+    the redirect is reported and the HEADs pick the next representative: the
+    first asset at another URL whose HEAD stays on https. When no asset
+    qualifies, or its ranged GET redirects off https too, ``PTL-LIV-000``
+    says the host-level checks did not run.
+    """
+    first = targets[0]
+    log.debug("probing host %s: %d target(s)", host, len(targets))
+    probed = _probe_host(host, first, prober, heads)
+    if isinstance(probed, Finding):
+        return [probed]
+    ranged, preflighted = probed
+    location = ranged.off_https()
+    if location is None:
+        findings = _check_server(host, first, ranged, preflighted)
+        findings.extend(_check_heads(host, targets, heads))
+        return findings
+    findings = [_ranged_off_https(first, location)]
+    head_findings = _check_heads(host, targets, heads, reported=first)
+    if host in heads.failed:
+        return findings + head_findings
+    rep = next((t for t in targets if t.url != first.url and _stays_on_https(heads, t.url)), None)
+    skipped = "every asset on it redirects off https"
+    if rep is not None:
+        probed = _probe_host(host, rep, prober, heads)
+        if isinstance(probed, Finding):
+            return [*findings, probed, *head_findings]
+        ranged, preflighted = probed
+        location = ranged.off_https()
+        if location is None:
+            findings.extend(_check_server(host, rep, ranged, preflighted))
+            return findings + head_findings
+        findings.append(_ranged_off_https(rep, location))
+        skipped = "the ranged GET of every asset tried redirects off https"
+    findings.append(
+        _unavailable(
+            f"range and CORS probes against host '{host}' did not run: {skipped}",
+            str(first.node.path),
+        )
+    )
+    return findings + head_findings
+
+
+def _stays_on_https(heads: _HeadCache, url: str) -> bool:
+    """Whether the HEAD already held for ``url`` answered without a redirect off https."""
+    response = heads.response(url)
+    return response is not None and response.off_https() is None
 
 
 def _check_links(host: str, targets: list[_LinkTarget], heads: _HeadCache) -> list[Finding]:
