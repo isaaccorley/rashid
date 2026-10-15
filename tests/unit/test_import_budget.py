@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import subprocess
 import sys
+from pathlib import Path
 
 import pytest
 
@@ -32,9 +33,9 @@ _HEAVY = frozenset(
 )
 # Profilers run the code; the code never imports them.
 _PROFILERS = frozenset({"pyinstrument", "memray"})
-# Loaded on the first HTTPS request. A local check sends none.
+# Loaded on the first HTTPS request. A --no-data check of a directory sends none.
 _NETWORK = frozenset({"obstore", "ssl", "urllib.request"})
-# Read on the first request, for the agent, or for --version and --timings.
+# Read on the first request, for the User-Agent header, or for --version and --timings.
 _METADATA = frozenset({"importlib.metadata"})
 
 _REPORT = "import sys, json; print(json.dumps(sorted(sys.modules)))"
@@ -73,6 +74,21 @@ def test_cli_help_loads_no_heavy_module() -> None:
     loaded = _loaded(code)
     assert "click" in loaded
     assert loaded & (_HEAVY | _PROFILERS | _NETWORK | _METADATA) == set()
+
+
+def test_a_local_metadata_check_loads_no_network_stack() -> None:
+    """A ``--no-data`` check of a directory sends no request, so it loads no transport."""
+    catalog = Path(__file__).parents[1] / "fixtures" / "reference-catalog"
+    code = (
+        "import contextlib, io\n"
+        "from rashid.cli import main\n"
+        "with contextlib.redirect_stdout(io.StringIO()):\n"
+        "    try:\n"
+        f"        main(['check', '--no-data', {str(catalog)!r}])\n"
+        "    except SystemExit:\n"
+        "        pass\n"
+    )
+    assert _loaded(code) & (_NETWORK | _METADATA) == set()
 
 
 @pytest.mark.parametrize("module", ["rashid.data.checks"])

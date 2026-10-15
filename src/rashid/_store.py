@@ -41,14 +41,21 @@ set far past any download a check makes, so only a server that trickles bytes
 forever reaches it.
 
 ``obstore``, ``ssl``, and ``urllib.request`` load on the first request, not on
-import. Together they cost about half of ``import rashid``, and a local check
-never sends a request.
+import. They add about 15 ms to ``import rashid``, and ``--help`` or a
+``--no-data`` check of a directory sends no request.
+
+The first import of obstore is not safe across threads. A thread that imports
+``obstore`` while another imports ``obstore.store`` can deadlock, and the
+loser then finds ``obstore.exceptions`` empty. Every obstore call goes through
+:func:`_store`, which imports obstore under a lock, so each later ``import
+obstore`` finds the package loaded.
 """
 
 from __future__ import annotations
 
 import logging
 import re
+import threading
 import time
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -94,6 +101,9 @@ _RETRY: dict[str, Any] = {"max_retries": 3, "retry_timeout": _IDLE}
 # The urllib transport's first wait before a retry; each retry doubles it.
 _BACKOFF = 0.1  # seconds
 
+# Held while obstore loads. See the module docstring.
+_IMPORT_LOCK = threading.Lock()
+
 
 class StoreError(OSError):
     """A request that failed.
@@ -112,7 +122,9 @@ class StoreError(OSError):
 @cache
 def _store(origin: str) -> HTTPStore:
     """One store, and so one connection pool, per ``https://host``."""
-    from obstore.store import HTTPStore
+    with _IMPORT_LOCK:
+        import obstore  # noqa: F401 - the package first, so it loads whole
+        from obstore.store import HTTPStore
 
     options = {"user_agent": user_agent(), **CLIENT_OPTIONS}
     return HTTPStore.from_url(origin, client_options=options, retry_config=_RETRY)  # type: ignore[arg-type]
