@@ -39,35 +39,39 @@ timeout does, so a stalled server fails in 30 s while a large asset that keeps
 arriving downloads in full. obstore also requires an overall ``timeout``; it is
 set far past any download a check makes, so only a server that trickles bytes
 forever reaches it.
+
+``obstore``, ``ssl``, and ``urllib.request`` load on the first request, not on
+import. They add about 15 ms to ``import rashid``, and ``--help`` or a
+``--no-data`` check of a directory sends no request.
+
+The first import of obstore is not safe across threads. A thread that imports
+``obstore`` while another imports ``obstore.store`` can deadlock, and the
+loser then finds ``obstore.exceptions`` empty. Every obstore call goes through
+:func:`_store`, which imports obstore under a lock, so each later ``import
+obstore`` finds the package loaded.
 """
 
 from __future__ import annotations
 
 import logging
 import re
-import ssl
+import threading
 import time
 from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import timedelta
 from functools import cache
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from urllib.error import HTTPError
 from urllib.parse import unquote, urlsplit
-from urllib.request import (
-    HTTPRedirectHandler,
-    HTTPSHandler,
-    OpenerDirector,
-    Request,
-    build_opener,
-)
-
-import obstore
-from obstore.exceptions import InvalidPathError, NotSupportedError
-from obstore.store import HTTPStore
 
 from rashid import _trace
 from rashid._http import user_agent
+
+if TYPE_CHECKING:
+    from urllib.request import OpenerDirector
+
+    from obstore.store import HTTPStore
 
 log = logging.getLogger(__name__)
 
@@ -97,6 +101,9 @@ _RETRY: dict[str, Any] = {"max_retries": 3, "retry_timeout": _IDLE}
 # The urllib transport's first wait before a retry; each retry doubles it.
 _BACKOFF = 0.1  # seconds
 
+# Held while obstore loads. See the module docstring.
+_IMPORT_LOCK = threading.Lock()
+
 
 class StoreError(OSError):
     """A request that failed.
@@ -115,6 +122,10 @@ class StoreError(OSError):
 @cache
 def _store(origin: str) -> HTTPStore:
     """One store, and so one connection pool, per ``https://host``."""
+    with _IMPORT_LOCK:
+        import obstore  # noqa: F401 - the package first, so it loads whole
+        from obstore.store import HTTPStore
+
     options = {"user_agent": user_agent(), **CLIENT_OPTIONS}
     return HTTPStore.from_url(origin, client_options=options, retry_config=_RETRY)  # type: ignore[arg-type]
 
@@ -163,49 +174,49 @@ def _urllib_can_read(exc: Exception) -> bool:
     ``Content-Length``; urllib handles both. A redirect off https is refused by
     both transports, so asking urllib only repeats the request.
     """
+    from obstore.exceptions import InvalidPathError
+
     return isinstance(exc, InvalidPathError) or _NO_LENGTH in str(exc)
 
 
 # --- the urllib transport ----------------------------------------------------
 
 
-class _HttpsOnlyRedirects(HTTPRedirectHandler):
-    """Follow a redirect only to another https URL, as obstore does."""
+def _build_opener(*, refuse: bool) -> OpenerDirector:
+    """A urllib opener with the store's TLS options that never steps off https.
 
-    def redirect_request(
-        self, req: Request, fp: Any, code: int, msg: str, headers: Any, newurl: str
-    ) -> Request | None:
-        if urlsplit(newurl).scheme.lower() != "https":
-            raise StoreError(f"redirect to a non-https URL refused: {newurl}", refused=True)
-        return super().redirect_request(req, fp, code, msg, headers, newurl)
+    A redirect to another https URL is followed. A redirect off https raises
+    :class:`StoreError` when ``refuse`` is set, as obstore refuses it. Without
+    ``refuse``, the handler returns None, so urllib raises the redirect as an
+    ``HTTPError`` with its status and its ``Location`` header, and sends
+    nothing to the new URL.
 
-
-class _AnswerOffHttpsRedirects(HTTPRedirectHandler):
-    """Follow a redirect to another https URL; answer one off https as it came.
-
-    Returning None makes urllib raise the redirect as an ``HTTPError``, with
-    its status and its ``Location`` header, and send nothing to the new URL.
+    ``ssl`` and ``urllib.request`` load here, so the handler class is defined
+    here too.
     """
+    import ssl
+    from urllib.request import HTTPRedirectHandler, HTTPSHandler, Request, build_opener
 
-    def redirect_request(
-        self, req: Request, fp: Any, code: int, msg: str, headers: Any, newurl: str
-    ) -> Request | None:
-        if urlsplit(newurl).scheme.lower() != "https":
-            return None
-        return super().redirect_request(req, fp, code, msg, headers, newurl)
+    class _HttpsRedirects(HTTPRedirectHandler):
+        def redirect_request(
+            self, req: Request, fp: Any, code: int, msg: str, headers: Any, newurl: str
+        ) -> Request | None:
+            if urlsplit(newurl).scheme.lower() != "https":
+                if refuse:
+                    raise StoreError(f"redirect to a non-https URL refused: {newurl}", refused=True)
+                return None
+            return super().redirect_request(req, fp, code, msg, headers, newurl)
 
-
-def _context() -> ssl.SSLContext:
     context = ssl.create_default_context()
     if CLIENT_OPTIONS.get("allow_invalid_certificates"):
         context.check_hostname = False
         context.verify_mode = ssl.CERT_NONE
-    return context
+    return build_opener(_HttpsRedirects(), HTTPSHandler(context=context))
 
 
 @cache
 def _opener() -> OpenerDirector:
-    return build_opener(_HttpsOnlyRedirects(), HTTPSHandler(context=_context()))
+    return _build_opener(refuse=True)
 
 
 @cache
@@ -216,11 +227,13 @@ def probe_opener() -> OpenerDirector:
     answer: ``open`` raises it as an ``HTTPError`` that carries the status and
     the ``Location``, and no request goes to the http URL.
     """
-    return build_opener(_AnswerOffHttpsRedirects(), HTTPSHandler(context=_context()))
+    return _build_opener(refuse=False)
 
 
 def _send(url: str, method: str, headers: dict[str, str] | None) -> Any:
     """Open ``url`` over urllib, retrying a 5xx or a failed connection as obstore does."""
+    from urllib.request import Request
+
     request = Request(url, method=method, headers={"User-Agent": user_agent(), **(headers or {})})
     idle = CLIENT_OPTIONS["read_timeout"].total_seconds()
     deadline = time.monotonic() + _RETRY["retry_timeout"].total_seconds()
@@ -279,6 +292,8 @@ def get(url: str, *, max_bytes: int | None = None) -> bytes:
         if located is None:
             _fallback("GET", url, "obstore cannot request this path")
             return _urllib_get(url, max_bytes)
+        import obstore
+
         try:
             result = obstore.get(*located)
             if max_bytes is not None and result.meta["size"] > max_bytes:
@@ -313,6 +328,9 @@ def head_size(url: str) -> int:
     with _trace.span("http.head"):
         located = _locate(url)
         if located is not None:
+            import obstore
+            from obstore.exceptions import InvalidPathError
+
             try:
                 size = int(obstore.head(*located)["size"])
                 log.debug("HEAD %s: %d bytes", url, size)
@@ -341,6 +359,9 @@ def get_range(url: str, start: int, end: int) -> bytes:
     with _trace.span("http.range"):
         located = _locate(url)
         if located is not None:
+            import obstore
+            from obstore.exceptions import NotSupportedError
+
             try:
                 return obstore.get_range(*located, start=start, end=end).to_bytes()
             except NotSupportedError:
@@ -364,6 +385,8 @@ def stream(url: str, chunk_size: int) -> Iterator[bytes]:
     log.debug("GET %s: streaming", url)
     located = _locate(url)
     if located is not None:
+        import obstore
+
         try:
             result = obstore.get(*located)
         except Exception as exc:  # noqa: BLE001 - obstore raises several types; the text has the status

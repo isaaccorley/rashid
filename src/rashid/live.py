@@ -68,10 +68,9 @@ import posixpath
 from collections.abc import Mapping
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
-from typing import Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol
 from urllib.error import HTTPError
 from urllib.parse import urlparse
-from urllib.request import Request
 
 from rashid import _store, _trace
 from rashid._http import user_agent
@@ -79,6 +78,9 @@ from rashid.catalog import CatalogGraph, Kind, Node, is_absolute_href
 from rashid.model import Finding, Severity
 from rashid.remote import wire_url
 from rashid.rules._common import links_of
+
+if TYPE_CHECKING:
+    from urllib.request import Request
 
 log = logging.getLogger(__name__)
 
@@ -237,6 +239,8 @@ def _open(request: Request) -> Any:
 
 
 def _request(url: str, method: str, headers: dict[str, str]) -> ProbeResponse:
+    from urllib.request import Request
+
     if urlparse(url).scheme.lower() != "https":
         raise ValueError(f"refusing to probe non-https URL: {url!r}")
     # Every probe shape — ranged GET, HEAD, OPTIONS preflight — funnels through
