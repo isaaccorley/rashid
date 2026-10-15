@@ -220,6 +220,52 @@ def test_systemic_failure_returns_without_waiting_on_running_objects(
     assert [f.rule_id for f in findings] == [DAT_UNAVAILABLE]
 
 
+class _EndlessReader(_HrefReader):
+    """Streams chunks forever, as a multi-gigabyte asset seems to a checksum."""
+
+    def stream(self, node: Node, href: str) -> Iterator[bytes] | None:
+        def chunks() -> Iterator[bytes]:
+            while True:
+                yield b"x" * 1024
+
+        return chunks()
+
+
+def test_systemic_failure_stops_a_running_stream(catalog: CatalogBuilder) -> None:
+    """An object still streaming stops at its next chunk once the pass returns.
+
+    The pool threads are not daemons, so the interpreter joins them at exit.
+    A stream that ran on would hold the process open after the report.
+    """
+    graph = _items_graph(catalog, 2)
+    streaming = threading.Event()
+    stopped: list[BaseException] = []
+    done = threading.Event()
+
+    def check(node: Node, reader: AssetReader) -> list[DataDefect]:
+        if node.id == "seg0":
+            streaming.wait(timeout=10)
+            raise RuntimeError("reader exploded")
+        if node.id == "seg1":
+            stream = reader.stream(node, "remote.tif")
+            assert stream is not None
+            try:
+                for _chunk in stream:
+                    streaming.set()
+            except BaseException as exc:
+                stopped.append(exc)
+                raise
+            finally:
+                done.set()
+        return []
+
+    findings = validate_data(graph, check, reader_factory=lambda graph: _EndlessReader())
+
+    assert [f.rule_id for f in findings] == [DAT_UNAVAILABLE]
+    assert done.wait(timeout=10), "the stream ran on after the pass returned"
+    assert "ended" in str(stopped[0])
+
+
 def test_systemic_failure_keeps_earlier_findings_and_drops_later_ones(
     catalog: CatalogBuilder,
 ) -> None:

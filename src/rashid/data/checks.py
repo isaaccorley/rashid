@@ -185,12 +185,19 @@ _VALID_PERCENT_KEY = "STATISTICS_VALID_PERCENT"
 #   cog_validate; PTL-DAT-011 still reports the missing internal overviews.
 # - VSI_CACHE keeps the bytes already read in RAM for the one open dataset the
 #   stats, overview, tile, and extent reads share.
+# - GDAL_HTTP_MAX_RETRY retries a 429, 500, 502, 503, or 504, as rashid._store
+#   retries obstore's requests. GDAL's default is no retry. The data pass
+#   reads 32 assets at once, and a host that throttles answers 503 now and
+#   then. A raster open that fails on one would report a valid COG as broken.
+#   The first retry waits 0.5 s, and GDAL grows the wait after each one.
 # GDAL_HTTP_MERGE_CONSECUTIVE_RANGES is YES by default, so it is not set.
 # Local files keep GDAL's defaults, which is how a local .ovr stays visible.
 # rasterio sets these thread-locally on a worker thread.
 _REMOTE_GDAL = {
     "GDAL_DISABLE_READDIR_ON_OPEN": "EMPTY_DIR",
     "VSI_CACHE": "TRUE",
+    "GDAL_HTTP_MAX_RETRY": "3",
+    "GDAL_HTTP_RETRY_DELAY": "0.5",
 }
 
 
@@ -309,12 +316,11 @@ class _AssetFiles:
         return self._raster
 
     def close(self) -> None:
-        if self._raster is not None:
-            self._raster.close()
-        if self._parquet is not None:
-            self._parquet.close()
-        if self._handle is not None:
-            self._handle.close()
+        # One close that raises must not leave the other handles open.
+        with contextlib.ExitStack() as stack:
+            for opened in (self._handle, self._parquet, self._raster):
+                if opened is not None:
+                    stack.callback(opened.close)
 
     def __enter__(self) -> _AssetFiles:
         return self

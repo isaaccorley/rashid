@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import tracemalloc
 from collections import Counter
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
@@ -22,7 +23,7 @@ import rashid
 from rashid import _trace
 from rashid.model import Finding
 from tests import scenarios
-from tests._https import Seen
+from tests._https import DOCUMENT_SUFFIXES, Seen, ServedTree
 
 pytestmark = pytest.mark.integration
 
@@ -90,14 +91,19 @@ def test_data_large_counts(cache_dir: Path) -> None:
     assert counts["raster.cog_validates"] == 20
 
 
-def _remote_data_run(cache_dir: Path) -> tuple[list[Seen], int, list[Finding]]:
+def _remote_data_run(
+    cache_dir: Path, prepare: Callable[[ServedTree], None] | None = None
+) -> tuple[list[Seen], int, list[Finding]]:
     """One run of ``remote-data/small``, on a fresh server.
 
     GDAL keeps a process-wide cache of what it read from each URL, so a second
     run against the same server would see fewer requests than the first. Each
     call serves the tree on a new port, which gives the run new URLs.
+    ``prepare`` sets up the server before the run.
     """
     with scenarios.target("remote-data", "small", cache_dir=cache_dir) as target:
+        if prepare is not None:
+            prepare(target.server)
         report = rashid.validate(target.location, **target.options)
         return target.server.seen(), target.server.peak_in_flight(), report.findings
 
@@ -116,7 +122,9 @@ def test_remote_data_requests_per_asset(cache_dir: Path) -> None:
     seen, _peak, _findings = _remote_data_run(cache_dir)
     # The crawl's documents and the AGENTS.md and README.md beside them are
     # not assets.
-    per_request = Counter((s.method, s.path) for s in seen if not s.path.endswith((".json", ".md")))
+    per_request = Counter(
+        (s.method, s.path) for s in seen if not s.path.endswith(DOCUMENT_SUFFIXES)
+    )
     expected: Counter[tuple[str, str]] = Counter({("GET", "/layers/thumbnail.png"): 1})
     for i in range(2):
         for name in (f"points-{i:03d}/data.parquet", f"raster-{i:03d}/data.tif"):
@@ -134,13 +142,40 @@ def test_remote_data_requests_per_asset(cache_dir: Path) -> None:
 def test_remote_data_reads_in_parallel(cache_dir: Path) -> None:
     """The data pass holds several asset requests open at once.
 
-    A serial loop holds at most one, so this fails on a return to it, with no
-    wall-clock threshold to flake on a slow runner.
+    The server counts asset requests only, not the crawl's, which fetches its
+    documents on many threads. Each object reads its own assets one at a
+    time, so a serial loop over objects holds at most one. This fails on a
+    return to it, with no wall-clock threshold to flake on a slow runner.
     """
     pytest.importorskip("pyarrow")
     pytest.importorskip("rasterio")
     _seen, peak, _findings = _remote_data_run(cache_dir)
     assert peak >= 2
+
+
+def _data_findings(findings: list[Finding]) -> list[tuple[object, ...]]:
+    return [
+        (f.rule_id, f.severity, f.path, f.json_pointer, f.message)
+        for f in findings
+        if f.rule_id.startswith("PTL-DAT-")
+    ]
+
+
+def test_remote_data_raster_open_retries_a_throttled_request(cache_dir: Path) -> None:
+    """GDAL retries a 503, so a throttling host does not make a valid COG broken.
+
+    GDAL sends no retry by default. The first two of GDAL's requests for
+    one COG answer 503 here, and the findings must still match a local run.
+    """
+    pytest.importorskip("pyarrow")
+    pytest.importorskip("rasterio")
+    tif = "/layers/raster-000/data.tif"
+    seen, _peak, remote = _remote_data_run(cache_dir, lambda server: server.fail(tif, 2, "GDAL"))
+    local = rashid.validate(scenarios.cached("data", "small", cache_dir=cache_dir)).findings
+
+    assert _data_findings(remote) == _data_findings(local)
+    gdal = [s for s in seen if s.path == tif and "GDAL" in s.headers.get("user-agent", "")]
+    assert len(gdal) >= 3  # two refused, then the one that succeeded
 
 
 def test_remote_data_findings_match_local(cache_dir: Path) -> None:
@@ -150,15 +185,8 @@ def test_remote_data_findings_match_local(cache_dir: Path) -> None:
     _seen, _peak, remote = _remote_data_run(cache_dir)
     local = rashid.validate(scenarios.cached("data", "small", cache_dir=cache_dir)).findings
 
-    def data_findings(findings: list[Finding]) -> list[tuple[object, ...]]:
-        return [
-            (f.rule_id, f.severity, f.path, f.json_pointer, f.message)
-            for f in findings
-            if f.rule_id.startswith("PTL-DAT-")
-        ]
-
-    assert data_findings(remote) == data_findings(local)
-    assert data_findings(local)  # the scenario reports something to compare
+    assert _data_findings(remote) == _data_findings(local)
+    assert _data_findings(local)  # the scenario reports something to compare
 
 
 def test_remote_small_counts(cache_dir: Path) -> None:

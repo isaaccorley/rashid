@@ -14,7 +14,7 @@ import subprocess
 import sys
 import threading
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -35,7 +35,8 @@ class Route:
     first, so a test can serve a slow body or one that stalls. ``latency`` is
     a pause before the status line, as a distant host takes to answer. The
     first ``fail_first`` requests answer 503 instead, as a throttling host
-    does.
+    does. With ``fail_agent`` set, only requests whose ``User-Agent``
+    contains it count toward ``fail_first``.
     """
 
     status: int = 200
@@ -46,6 +47,7 @@ class Route:
     delay: float = 0.0
     latency: float = 0.0
     fail_first: int = 0
+    fail_agent: str = ""
 
 
 @dataclass
@@ -59,7 +61,8 @@ class HttpsServer:
     """The routes to answer, and what the server saw.
 
     ``peak_in_flight`` is the most requests the server held open at once,
-    which shows whether a client sent them in parallel. ``ca_pem`` is the
+    which shows whether a client sent them in parallel. Only the paths that
+    ``counted`` accepts enter it. ``ca_pem`` is the
     certificate authority that signed the server's certificate, for a
     client such as GDAL's libcurl that reads its trust store from a file.
     """
@@ -71,6 +74,7 @@ class HttpsServer:
         self.ca_pem = b""
         self.in_flight = 0
         self.peak_in_flight = 0
+        self.counted: Callable[[str], bool] = lambda _path: True
         self._lock = threading.Lock()
 
     def enter(self) -> None:
@@ -81,6 +85,14 @@ class HttpsServer:
     def leave(self) -> None:
         with self._lock:
             self.in_flight -= 1
+
+    def take_failure(self, route: Route, agent: str) -> bool:
+        """Whether this request answers 503, which uses up one of ``fail_first``."""
+        with self._lock:
+            if route.fail_first and route.fail_agent in agent:
+                route.fail_first -= 1
+                return True
+            return False
 
     def url(self, path: str) -> str:
         return f"{self.base}/{path.lstrip('/')}"
@@ -94,6 +106,9 @@ def _handler(server: HttpsServer) -> type[BaseHTTPRequestHandler]:
             return None
 
         def _answer(self, send_body: bool) -> None:
+            if not server.counted(self.path):
+                self._respond(send_body)
+                return
             server.enter()
             try:
                 self._respond(send_body)
@@ -108,8 +123,7 @@ def _handler(server: HttpsServer) -> type[BaseHTTPRequestHandler]:
             if route.latency:
                 time.sleep(route.latency)
             body, status = route.body, route.status
-            if route.fail_first:
-                route.fail_first -= 1
+            if server.take_failure(route, self.headers.get("User-Agent", "")):
                 body, status = b"", 503
             headers = dict(route.headers)
             byte_range = self.headers.get("Range")
@@ -213,6 +227,9 @@ def https_server() -> Iterator[HttpsServer]:
 
 # --- a server in its own process ----------------------------------------------
 
+#: The files a crawl fetches. Every other file in a served tree is an asset.
+DOCUMENT_SUFFIXES = (".json", ".md")
+
 
 class ServedTree:
     """A directory served over HTTPS by a child process, and what it saw.
@@ -244,7 +261,12 @@ class ServedTree:
         return [Seen(method, path, headers) for method, path, headers in self._ask("seen")["seen"]]
 
     def peak_in_flight(self) -> int:
+        """The most asset requests open at once. Documents do not count."""
         return int(self._ask("peak")["peak"])
+
+    def fail(self, path: str, count: int, agent: str) -> None:
+        """Answer 503 to the next ``count`` requests for ``path`` from ``agent``."""
+        self._ask(f"fail {path} {count} {agent}")
 
     def reset(self) -> None:
         self._ask("reset")
@@ -256,7 +278,10 @@ def serving_tree(root: Path, latency: float = 0.0) -> Iterator[ServedTree]:
 
     Each file is a route at its path relative to ``root``. Every file but a
     ``.json`` document waits ``latency`` seconds before its answer, so the
-    crawl stays fast and the asset reads carry the cost. ``rashid._store``
+    crawl stays fast and the asset reads carry the cost. The peak in flight
+    counts the asset requests only. The crawl fetches each level's documents
+    and its ``.md`` files on many threads, and its overlap must not pass for
+    the data pass's. ``rashid._store``
     trusts the child's certificate for the duration, as with :func:`serving`.
     """
     child = subprocess.Popen(
@@ -297,6 +322,7 @@ def _serve_tree(root: Path, latency: float) -> None:
             wait = 0.0 if path.suffix == ".json" else latency
             route = Route(body=path.read_bytes(), latency=wait)
             server.routes["/" + path.relative_to(root).as_posix()] = route
+        server.counted = lambda path: not path.endswith(DOCUMENT_SUFFIXES)
         print(json.dumps({"base": server.base, "ca_pem": server.ca_pem.decode()}), flush=True)
         for line in sys.stdin:
             command = line.strip()
@@ -305,6 +331,11 @@ def _serve_tree(root: Path, latency: float) -> None:
                 reply: dict[str, Any] = {"seen": seen}
             elif command == "peak":
                 reply = {"peak": server.peak_in_flight}
+            elif command.startswith("fail "):
+                _, path, count, agent = command.split(" ", 3)
+                failing = server.routes[path]
+                failing.fail_first, failing.fail_agent = int(count), agent
+                reply = {}
             else:
                 server.seen.clear()
                 server.peak_in_flight = 0

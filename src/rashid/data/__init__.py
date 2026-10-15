@@ -33,7 +33,8 @@ catalog with no data pass installs nothing new.
 
 from __future__ import annotations
 
-from collections.abc import Callable
+import threading
+from collections.abc import Callable, Iterator
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from functools import partial
@@ -41,7 +42,7 @@ from typing import Any
 
 from rashid import _trace
 from rashid.catalog import CatalogGraph, Kind, Node
-from rashid.data.reader import AssetReader, FilesystemHttpReader
+from rashid.data.reader import AssetReader, FilesystemHttpReader, Locator
 from rashid.model import Finding, Severity
 
 DAT_UNAVAILABLE = "PTL-DAT-000"
@@ -208,7 +209,8 @@ def validate_data(
     which thread finishes first. The first object whose validator raises ends
     the pass as the serial loop did: the findings of the objects before it are
     kept, the objects not yet started are cancelled, and nothing after it is
-    reported. A ``validator`` and the reader ``reader_factory`` builds are
+    reported. The objects still running then fail at their next call to the
+    reader, so a whole-object stream stops within one chunk. A ``validator`` and the reader ``reader_factory`` builds are
     therefore called from several threads at once, and must be thread-safe.
 
     ``reader_factory`` chooses which assets are readable at all;
@@ -236,11 +238,13 @@ def validate_data(
     reader = (reader_factory or FilesystemHttpReader)(graph)
     nodes = [node for node in graph.iter(*_DATA_KINDS) if node.parse_error is None]
     findings: list[Finding] = []
+    ended = threading.Event()
+    shared = _EndableReader(reader, ended)
     remote = ThreadPoolExecutor(_REMOTE_WORKERS, thread_name_prefix="data-remote")
     local = ThreadPoolExecutor(_LOCAL_WORKERS, thread_name_prefix="data-local")
     try:
         futures = [
-            _trace.submit(remote if _reads_remote(node, reader) else local, validator, node, reader)
+            _trace.submit(remote if _reads_remote(node, reader) else local, validator, node, shared)
             for node in nodes
         ]
         for node, future in zip(nodes, futures, strict=True):
@@ -259,12 +263,54 @@ def validate_data(
             findings.extend(_to_findings(node, defects))
     finally:
         # Every future is done on the normal path. On a systemic failure or an
-        # interrupt, drop the objects not yet started and return at once: an
-        # object already reading may be streaming gigabytes, and its result
-        # would be thrown away.
+        # interrupt, drop the objects not yet started and return without
+        # waiting. An object already reading may be streaming gigabytes for a
+        # checksum, and its result would be thrown away. The pool threads are
+        # not daemons, so the interpreter joins them at exit: ending the reader
+        # makes each one stop at its next chunk or reader call.
+        ended.set()
         for pool in (remote, local):
             pool.shutdown(wait=False, cancel_futures=True)
     return findings
+
+
+class _PassEnded(Exception):
+    """A worker read after :func:`validate_data` stopped waiting for it."""
+
+
+class _EndableReader:
+    """``reader``, until ``ended`` is set; then every call and chunk raises.
+
+    GDAL's own reads of a ``/vsicurl`` raster bypass this reader. They fetch
+    a header and a few tiles, not the whole object, so they end soon anyway.
+    """
+
+    def __init__(self, reader: AssetReader, ended: threading.Event) -> None:
+        self._reader = reader
+        self._ended = ended
+
+    def _check(self) -> None:
+        if self._ended.is_set():
+            raise _PassEnded("the data pass ended before this object finished")
+
+    def locate(self, node: Node, href: str) -> Locator | None:
+        self._check()
+        return self._reader.locate(node, href)
+
+    def stream(self, node: Node, href: str) -> Iterator[bytes] | None:
+        self._check()
+        stream = self._reader.stream(node, href)
+        return None if stream is None else self._chunks(stream)
+
+    def _chunks(self, stream: Iterator[bytes]) -> Iterator[bytes]:
+        try:
+            for chunk in stream:
+                self._check()
+                yield chunk
+        finally:
+            close = getattr(stream, "close", None)
+            if callable(close):
+                close()
 
 
 def _reads_remote(node: Node, reader: AssetReader) -> bool:
