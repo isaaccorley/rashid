@@ -55,6 +55,7 @@ host that rejects HEAD is reported, not worked around.
 
 from __future__ import annotations
 
+import logging
 import posixpath
 from collections.abc import Mapping
 from concurrent.futures import ThreadPoolExecutor
@@ -64,12 +65,14 @@ from urllib.error import HTTPError
 from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 
-from rashid import _store
+from rashid import _store, _trace
 from rashid._http import user_agent
 from rashid.catalog import CatalogGraph, Kind, Node, is_absolute_href
 from rashid.model import Finding, Severity
 from rashid.remote import wire_url
 from rashid.rules._common import links_of
+
+log = logging.getLogger(__name__)
 
 LIV_UNAVAILABLE = "PTL-LIV-000"
 LIV_RANGE = "PTL-LIV-001"
@@ -542,8 +545,9 @@ class _HeadCache:
         rest = pending[1:]
         if host in self.failed or not rest:
             return
+        log.debug("HEAD %d URL(s) on %s in parallel", len(rest), host)
         with ThreadPoolExecutor(max_workers=_WORKERS) as pool:
-            outcomes = list(pool.map(self._try_head, rest))
+            outcomes = _trace.pool_map(pool, self._try_head, rest)
         for url, outcome in zip(rest, outcomes, strict=True):
             if isinstance(outcome, ProbeResponse):
                 self._responses[url] = outcome
@@ -551,6 +555,7 @@ class _HeadCache:
                 self._errors[url] = outcome
 
     def _try_head(self, url: str) -> ProbeResponse | Exception:
+        _trace.count("live.heads")
         try:
             return self._prober.head(url)
         except Exception as exc:  # noqa: BLE001 - kept for head() to report in order
@@ -559,6 +564,7 @@ class _HeadCache:
     def head(self, url: str) -> ProbeResponse | None:
         response = self._responses.get(url)
         if response is not None:
+            _trace.count("live.head_cache_hits")
             return response
         host = urlparse(url).netloc.lower()
         if host in self.failed:
@@ -577,6 +583,7 @@ class _HeadCache:
         """The status the host answers for ``url``; None once the host failed."""
         known = self._known.get(url)
         if known is not None:
+            _trace.count("live.known_statuses")
             return known
         response = self.head(url)
         return None if response is None else response.status
@@ -613,10 +620,14 @@ def _check_host(
     host: str, targets: list[_Target], prober: Prober, heads: _HeadCache
 ) -> list[Finding]:
     rep = targets[0]
+    log.debug("probing host %s: %d target(s), range and CORS via %s", host, len(targets), rep.url)
     try:
+        _trace.count("live.range_probes")
         ranged = prober.get_range(rep.url)
+        _trace.count("live.preflights")
         preflighted = prober.preflight(rep.url)
     except Exception as exc:  # noqa: BLE001 - an unreachable host is reported once
+        log.debug("host %s failed: %s", host, exc)
         heads.failed.setdefault(host, exc)
         return [
             _unavailable(f"live probes against host '{host}' failed: {exc}", str(rep.node.path))

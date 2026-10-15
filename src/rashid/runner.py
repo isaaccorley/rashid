@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import dataclasses
+import logging
 import tempfile
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
+from rashid import _trace
 from rashid._jsonschema import SchemaError
 from rashid.catalog import ROOT_CATALOG, CatalogGraph
 from rashid.config import RulesConfig
@@ -58,6 +60,8 @@ from rashid.remote import (
 from rashid.rule import Rule
 from rashid.schema import SCH_INVALID, validate_schema
 from rashid.structural import STR_INVALID, validate_structural
+
+log = logging.getLogger(__name__)
 
 GEN_MISSING_ROOT = "PTL-GEN-000"
 GEN_UNPARSEABLE = "PTL-GEN-001"
@@ -146,41 +150,64 @@ def _optional_passes(
     """Run the structural, extension, schema, data, and live passes, honouring disable ids."""
     findings: list[Finding] = []
     if options.structural and STR_INVALID not in config.disabled:
-        findings.extend(validate_structural(graph, options.structural_validator))
+        findings.extend(
+            _stage("structural", lambda: validate_structural(graph, options.structural_validator))
+        )
     if options.extensions and EXT_INVALID not in config.disabled:
         findings.extend(
             f
-            for f in validate_extensions(
-                graph, options.extensions_validator, allow_network=options.schema_allow_network
+            for f in _stage(
+                "extensions",
+                lambda: validate_extensions(
+                    graph, options.extensions_validator, allow_network=options.schema_allow_network
+                ),
             )
             if f.rule_id not in config.disabled
         )
     if options.schema and SCH_INVALID not in config.disabled:
         findings.extend(
-            validate_schema(
-                graph, options.schema_validator, allow_network=options.schema_allow_network
+            _stage(
+                "schema",
+                lambda: validate_schema(
+                    graph, options.schema_validator, allow_network=options.schema_allow_network
+                ),
             )
         )
     if options.data and not _DATA_RULE_IDS <= config.disabled:
         findings.extend(
             f
-            for f in validate_data(
-                graph, options.data_validator, reader_factory=options.data_reader_factory
+            for f in _stage(
+                "data",
+                lambda: validate_data(
+                    graph, options.data_validator, reader_factory=options.data_reader_factory
+                ),
             )
             if f.rule_id not in config.disabled
         )
     if options.live and not _LIVE_RULE_IDS <= config.disabled:
         findings.extend(
             f
-            for f in validate_live(
-                graph,
-                options.live_prober,
-                base_url=options.live_base_url,
-                known_statuses=options.live_known_statuses,
+            for f in _stage(
+                "live",
+                lambda: validate_live(
+                    graph,
+                    options.live_prober,
+                    base_url=options.live_base_url,
+                    known_statuses=options.live_known_statuses,
+                ),
             )
             if f.rule_id not in config.disabled
         )
     return findings
+
+
+def _stage(name: str, run: Callable[[], Iterable[Finding]]) -> list[Finding]:
+    """Run one pass inside a span called ``name``, and log what it found."""
+    log.debug("%s: start", name)
+    with _trace.span(name):
+        found = list(run())
+    log.debug("%s: %d finding(s)", name, len(found))
+    return found
 
 
 def validate(
@@ -339,8 +366,15 @@ def validate(
             ]
         )
 
-    graph = CatalogGraph.load(root)
+    graph = _load(root)
     return _validate_graph(graph, rules, config, options)
+
+
+def _load(root: Path) -> CatalogGraph:
+    with _trace.span("load"):
+        graph = CatalogGraph.load(root)
+    log.debug("load: %d object(s) under %s", len(graph.nodes), root)
+    return graph
 
 
 def _validate_url(
@@ -356,7 +390,8 @@ def _validate_url(
     base, root_url = split_catalog_url(url)
     with tempfile.TemporaryDirectory(prefix="rashid-") as tmp:
         try:
-            crawled = crawl(base, Path(tmp), fetcher, max_documents=max_documents)
+            with _trace.span("crawl"):
+                crawled = crawl(base, Path(tmp), fetcher, max_documents=max_documents)
         except FetchError as exc:
             return _missing_root(f"root catalog.json cannot be fetched: {exc}")
         status = crawled.statuses.get(root_url)
@@ -366,7 +401,7 @@ def _validate_url(
             return _missing_root(
                 f"root catalog.json cannot be fetched: GET {root_url} returned {status}"
             )
-        graph = CatalogGraph.load(Path(tmp))
+        graph = _load(Path(tmp))
         graph.base_url = base
         return _validate_graph(
             graph,
@@ -438,6 +473,30 @@ def _partial_tree_findings(crawled: Crawl, root_url: str) -> list[Finding]:
     return findings
 
 
+def _run_rules(graph: CatalogGraph, rules: Sequence[Rule], config: RulesConfig) -> list[Finding]:
+    """Every enabled rule over every object of the kinds it reads.
+
+    The node-check counter is added once at the end, not once per check, so
+    the count costs nothing inside the loop.
+    """
+    findings: list[Finding] = []
+    checks = 0
+    for rule in rules:
+        if rule.id in config.disabled:
+            continue
+        if not rule.kinds:
+            checks += 1
+            findings.extend(rule.check_graph(graph))
+            continue
+        for node in graph.iter(*rule.kinds):
+            if node.parse_error is not None:
+                continue
+            checks += 1
+            findings.extend(rule.check(node, graph))
+    _trace.count("rules.checks", checks)
+    return findings
+
+
 def _validate_graph(
     graph: CatalogGraph,
     rules: Sequence[Rule],
@@ -479,16 +538,7 @@ def _validate_graph(
                 )
             )
 
-    for rule in rules:
-        if rule.id in config.disabled:
-            continue
-        if not rule.kinds:
-            findings.extend(rule.check_graph(graph))
-            continue
-        for node in graph.iter(*rule.kinds):
-            if node.parse_error is not None:
-                continue
-            findings.extend(rule.check(node, graph))
+    findings.extend(_stage("rules", lambda: _run_rules(graph, rules, config)))
 
     findings.extend(_optional_passes(graph, config, options))
 

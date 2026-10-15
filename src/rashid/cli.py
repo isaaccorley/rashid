@@ -7,10 +7,13 @@ Exit codes: 0 when validation passed, 1 when errors were found,
 from __future__ import annotations
 
 import json as json_module
+import os
+from importlib.metadata import version
 from pathlib import Path
 
 import click
 
+from rashid import _trace
 from rashid.data.reader import LocalOnlyReader
 from rashid.model import Report, Severity
 from rashid.remote import is_catalog_url
@@ -58,8 +61,39 @@ class CatalogLocation(click.ParamType[Path | str]):
 
 @click.group()
 @click.version_option(package_name="rashid")
-def main() -> None:
+@click.option(
+    "-v",
+    "--verbose",
+    count=True,
+    help="Write log records to stderr: -v for INFO, -vv for DEBUG. This sets the log "
+    "level only; it does not change which findings print. Same as RASHID_LOG.",
+)
+@click.option("-q", "--quiet", is_flag=True, help="Write only ERROR log records to stderr.")
+@click.option(
+    "--timings",
+    is_flag=True,
+    help="Time each stage. Prints a table to stderr, or adds a meta block to --json "
+    "output. Same as RASHID_TIMINGS=1.",
+)
+@click.option(
+    "--trace",
+    "trace_path",
+    metavar="PATH",
+    default=None,
+    help="Write a Chrome trace of every stage to PATH at exit; open it in "
+    "https://ui.perfetto.dev. Same as RASHID_TRACE.",
+)
+def main(verbose: int, quiet: bool, timings: bool, trace_path: str | None) -> None:
     """rashid — validator and linter for Portolan catalogs."""
+    if verbose and quiet:
+        raise click.UsageError("--verbose and --quiet ask for opposite things.")
+    if verbose or quiet:
+        level = "error" if quiet else ("info" if verbose == 1 else "debug")
+        _trace.configure_logging(level, os.environ.get(_trace.ENV_LOG_FILE) or None)
+    if timings and not _trace.enabled():
+        _trace.enable("on")
+    if trace_path is not None:
+        _trace.trace_to(trace_path)
 
 
 @main.command()
@@ -163,21 +197,27 @@ def check(
         raise click.UsageError(
             "--live-base-url is not needed with a catalog URL; the URL is the base."
         )
-    report = validate(
-        catalog,
-        structural=structural,
-        extensions=extensions,
-        schema=schema,
-        schema_allow_network=schema_allow_network,
-        data=data,
-        data_reader_factory=LocalOnlyReader if data_scope == "local" else None,
-        live=live,
-        live_base_url=live_base_url,
-    )
+    with _trace.span("check"):
+        report = validate(
+            catalog,
+            structural=structural,
+            extensions=extensions,
+            schema=schema,
+            schema_allow_network=schema_allow_network,
+            data=data,
+            data_reader_factory=LocalOnlyReader if data_scope == "local" else None,
+            live=live,
+            live_base_url=live_base_url,
+        )
     if as_json:
-        click.echo(json_module.dumps(report.to_dict(), indent=2))
+        output = report.to_dict()
+        if _trace.enabled():
+            output["meta"] = _trace.meta(version("rashid"))
+        click.echo(json_module.dumps(output, indent=2))
     else:
         _print_human(report, list_all=list_all, force_summary=force_summary)
+        if _trace.enabled():
+            click.echo(_trace.format_timings(_trace.timings()), err=True)
     raise SystemExit(0 if report.passed else 1)
 
 

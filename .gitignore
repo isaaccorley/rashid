@@ -10,3 +10,5 @@ __pycache__/
 .claude/
 mutants/
 coverage.xml
+# Seeded scenarios and profiler output (scripts/profile.py)
+.cache/

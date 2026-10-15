@@ -63,6 +63,7 @@ from __future__ import annotations
 
 import glob as globmodule
 import hashlib
+import logging
 import math
 import posixpath
 import re
@@ -85,7 +86,7 @@ from shapely.errors import ShapelyError
 from shapely.geometry import shape
 from shapely.geometry.base import BaseGeometry
 
-from rashid import _json
+from rashid import _json, _trace
 from rashid._multihash import decode_multihash
 from rashid.catalog import CatalogGraph, Node
 from rashid.data import (
@@ -223,6 +224,21 @@ class _Wgs84Bounds:
     reprojected: bool = False
 
 
+log = logging.getLogger(__name__)
+
+
+def _parquet_file(source: Any) -> Any:
+    """``pq.ParquetFile(source)``, counted. Each open reads and parses the footer."""
+    _trace.count("parquet.opens")
+    return pq.ParquetFile(source)
+
+
+def _raster_open(path: str) -> Any:
+    """``rasterio.open(path)``, counted. Each open reads the TIFF header."""
+    _trace.count("raster.opens")
+    return rasterio.open(path)
+
+
 def check_node(
     node: Node, reader: AssetReader, graph: CatalogGraph | None = None
 ) -> list[DataDefect]:
@@ -239,7 +255,9 @@ def check_node(
         href = asset.get("href")
         if not isinstance(href, str) or not href:
             continue  # PTL-AST-001 reports a missing href
-        defects.extend(_check_asset(node, key, asset, href, reader, graph))
+        log.debug("data: %s asset %r: %s", node.path, key, href)
+        with _trace.span("data.asset"):
+            defects.extend(_check_asset(node, key, asset, href, reader, graph))
     return _collapse_shared_fields(defects)
 
 
@@ -280,6 +298,7 @@ def _check_asset(
     reader: AssetReader,
     graph: CatalogGraph | None = None,
 ) -> list[DataDefect]:
+    _trace.count("data.assets")
     defects: list[DataDefect] = []
     media_type = asset.get("type")
     expected = _expected_format(media_type) if isinstance(media_type, str) else None
@@ -412,6 +431,7 @@ def _consume(stream: Iterator[bytes], hasher: Any) -> tuple[bytes, int]:
             head += chunk[: _HEAD_BYTES - len(head)]
         if hasher is not None:
             hasher.update(chunk)
+    _trace.count("data.bytes_read", count)
     return head, count
 
 
@@ -530,6 +550,7 @@ def _check_raster(key: str, located: Locator) -> list[DataDefect]:
     """A raster asset MUST be a valid COG (formats.md:91) with embedded band stats."""
     defects: list[DataDefect] = []
     try:
+        _trace.count("raster.cog_validates")
         is_valid, errors, _warnings = cog_validate(located.gdal_path(), quiet=True)
     except Exception as exc:  # noqa: BLE001 - a reader failure is not a conformance fault
         return [
@@ -590,7 +611,7 @@ def _check_overviews(key: str, located: Locator) -> list[DataDefect]:
     External ``.ovr`` sidecars are already an error inside ``cog_validate``.
     """
     try:
-        with rasterio.Env(GDAL_PAM_ENABLED="NO"), rasterio.open(located.gdal_path()) as src:
+        with rasterio.Env(GDAL_PAM_ENABLED="NO"), _raster_open(located.gdal_path()) as src:
             shape = _tile_shape(src)
             tile = max(shape) if shape is not None else _MAX_TILE
             oversized = max(src.width, src.height) > tile
@@ -621,7 +642,7 @@ def _check_tile_size(key: str, located: Locator) -> list[DataDefect]:
     already reports through PTL-DAT-004.
     """
     try:
-        with rasterio.Env(GDAL_PAM_ENABLED="NO"), rasterio.open(located.gdal_path()) as src:
+        with rasterio.Env(GDAL_PAM_ENABLED="NO"), _raster_open(located.gdal_path()) as src:
             shape = _tile_shape(src)
             if shape is None:
                 return []
@@ -658,7 +679,7 @@ def _check_cog_stats(key: str, located: Locator) -> list[DataDefect]:
     try:
         # GDAL_PAM_ENABLED=NO ignores any .aux.xml sidecar, so only statistics
         # embedded in the file's GDAL_METADATA tag count — as the spec requires.
-        with rasterio.Env(GDAL_PAM_ENABLED="NO"), rasterio.open(located.gdal_path()) as src:
+        with rasterio.Env(GDAL_PAM_ENABLED="NO"), _raster_open(located.gdal_path()) as src:
             missing: list[int] = []
             vp_should: list[int] = []  # valid percent absent, no nodata: SHOULD
             vp_must: list[int] = []  # valid percent absent with nodata: MUST
@@ -816,7 +837,7 @@ def _check_geoparquet(
     subject = subject or f"asset '{key}'"
     try:
         source: Any = located.open_binary() if located.is_remote else located.source
-        parquet = pq.ParquetFile(source)
+        parquet = _parquet_file(source)
     except Exception:  # noqa: BLE001 - unreadable Parquet: format/checksum checks own it
         return []
 
@@ -990,7 +1011,7 @@ def _check_mirror(
 
     try:
         source: Any = located.open_binary() if located.is_remote else located.source
-        parquet = pq.ParquetFile(source)
+        parquet = _parquet_file(source)
     except Exception:  # noqa: BLE001 - unreadable Parquet: format/checksum checks own it
         return []
 
@@ -1291,7 +1312,7 @@ def _check_tabular(
         return []
     try:
         source: Any = located.open_binary() if located.is_remote else located.source
-        parquet = pq.ParquetFile(source)
+        parquet = _parquet_file(source)
     except Exception:  # noqa: BLE001 - unreadable Parquet: format/checksum checks own it
         return []
     if _geo_metadata(parquet) is not None:
@@ -1337,7 +1358,7 @@ def _check_vector_columns(
         return []
     try:
         source: Any = located.open_binary() if located.is_remote else located.source
-        parquet = pq.ParquetFile(source)
+        parquet = _parquet_file(source)
     except Exception:  # noqa: BLE001 - unreadable Parquet: format/checksum checks own it
         return []
     if _geo_metadata(parquet) is None:
@@ -1805,7 +1826,7 @@ def _check_partition_schemas(node: Node) -> list[DataDefect]:
     schemas: list[tuple[str, dict[str, str]]] = []
     for match, path in _partition_files(node):
         try:
-            parquet = pq.ParquetFile(str(path))
+            parquet = _parquet_file(str(path))
         except Exception:  # noqa: BLE001 # nosec B112 - unreadable partition: the byte checks own it
             continue
         arrow = parquet.schema_arrow
@@ -1976,7 +1997,7 @@ def _extract_geo(expected: str, located: Locator) -> _Geo | None:
 
 def _geo_from_parquet(located: Locator) -> _Geo | None:
     source: Any = located.open_binary() if located.is_remote else located.source
-    parquet = pq.ParquetFile(source)
+    parquet = _parquet_file(source)
     raw = (parquet.schema_arrow.metadata or {}).get(b"geo")
     if raw is None:
         return None
@@ -1990,7 +2011,7 @@ def _geo_from_parquet(located: Locator) -> _Geo | None:
 
 
 def _geo_from_raster(located: Locator) -> _Geo | None:
-    with rasterio.open(located.gdal_path()) as src:
+    with _raster_open(located.gdal_path()) as src:
         bounds = src.bounds
         crs = CRS.from_wkt(src.crs.to_wkt()) if src.crs else None
         return _Geo(

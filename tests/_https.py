@@ -12,6 +12,7 @@ import ssl
 import threading
 import time
 from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -107,9 +108,13 @@ def _handler(server: HttpsServer) -> type[BaseHTTPRequestHandler]:
     return Handler
 
 
-@pytest.fixture
-def https_server(monkeypatch: pytest.MonkeyPatch) -> Iterator[HttpsServer]:
-    """A running local HTTPS server that ``rashid._store`` trusts."""
+@contextmanager
+def serving() -> Iterator[HttpsServer]:
+    """Run a local HTTPS server that ``rashid._store`` trusts until the block ends.
+
+    ``scripts/profile.py`` and ``tests/scenarios.py`` use this outside pytest,
+    so it sets and restores ``allow_invalid_certificates`` itself.
+    """
     authority = trustme.CA()
     certificate = authority.issue_cert("127.0.0.1", "localhost")
     context = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)
@@ -121,11 +126,26 @@ def https_server(monkeypatch: pytest.MonkeyPatch) -> Iterator[HttpsServer]:
     # A short poll interval: shutdown() waits up to one interval, once per test.
     thread = threading.Thread(target=httpd.serve_forever, args=(0.02,), daemon=True)
     thread.start()
-    monkeypatch.setitem(_store.CLIENT_OPTIONS, "allow_invalid_certificates", True)
+    previous = _store.CLIENT_OPTIONS.get("allow_invalid_certificates", _UNSET)
+    _store.CLIENT_OPTIONS["allow_invalid_certificates"] = True
     _store.reset()
     try:
         yield state
     finally:
         httpd.shutdown()
         httpd.server_close()
+        if previous is _UNSET:
+            del _store.CLIENT_OPTIONS["allow_invalid_certificates"]
+        else:
+            _store.CLIENT_OPTIONS["allow_invalid_certificates"] = previous
         _store.reset()
+
+
+_UNSET = object()
+
+
+@pytest.fixture
+def https_server() -> Iterator[HttpsServer]:
+    """A running local HTTPS server that ``rashid._store`` trusts."""
+    with serving() as state:
+        yield state

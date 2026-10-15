@@ -62,6 +62,73 @@ CI runs this nightly against the floor in `.mutation-baseline`, currently
 72%. Ratchet that number up as the suite improves. Lowering it needs a
 justification in the pull request that does so.
 
+## Measuring performance
+
+A performance claim needs a number from a fixed input. The seeded
+scenarios in `tests/scenarios.py` build the same catalog every time, at a
+small and a large size. Comparing the two runs shows whether a cost grows
+with the catalog. `scripts/profile.py` runs one scenario and measures it:
+
+```bash
+uv run python scripts/profile.py metadata --mode counts
+uv run python scripts/profile.py remote --size large \
+  --mode time
+uv run python scripts/profile.py data --mode mem
+uv run python scripts/profile.py metadata --mode import
+uv run python scripts/profile.py metadata --size large \
+  --mode instr
+```
+
+The `metadata` scenario validates collections and items without reading
+asset bytes. `data` reads real GeoParquet and Cloud Optimized GeoTIFF files. `remote` serves
+the `metadata` tree over a local HTTPS server and validates it by URL,
+with the live pass on. `--warm` runs once before the measured run, which
+leaves out the one-time schema load.
+
+The `counts` mode needs no extra package. It prints every operation
+counter and the time spent in each stage:
+
+```text
+# metadata/small seed=0
+json.parses                           147
+rules.checks                        1,821
+schema.rust_compiles                    3
+schema.rust_passes                    103
+
+span              calls      wall ms       cpu ms  peak rss MB
+load                  1         14.3         14.3         38.9
+rules                 1         23.0         23.0         38.9
+structural            1         51.1         51.0         48.8
+extensions            1          2.3          2.3         49.1
+```
+
+The `time` mode runs pyinstrument and `mem` runs memray. Both load through
+`uv run --with` at the pinned version in the script, so neither is a
+dependency of rashid. memray does not run on Windows. The `instr` mode
+counts instructions with cachegrind. Install `valgrind` before you use it.
+An instruction count changes much less between runs than wall time.
+
+Counters are always on, and tests assert their exact values. The tests in
+`tests/integration/test_operation_counts.py` fix the counts for each small
+scenario and a memory ceiling for the large one. A change that does less
+work updates those numbers in the same pull request.
+
+The CLI reports the same data on any catalog:
+
+```bash
+uv run rashid --timings check --json path/to/catalog
+uv run rashid -vv check path/to/catalog
+uv run rashid --trace trace.json check path/to/catalog
+```
+
+`--timings` adds a `meta` block to `--json` output, or prints the stage
+table to stderr. `-v` and `-vv` write `INFO` and `DEBUG` log records to
+stderr, and stdout keeps the report alone. `--trace` writes a Chrome trace,
+which <https://ui.perfetto.dev> opens. The environment variables
+`RASHID_LOG`, `RASHID_LOG_FILE`, `RASHID_TIMINGS`, and `RASHID_TRACE` do the
+same for a library caller. `RASHID_LOG_FILE` writes every record as one
+JSON object per line.
+
 ## CI
 
 CI logic lives in

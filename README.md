@@ -68,6 +68,18 @@ A catalog can produce thousands of similar findings. After 50 findings, rashid g
 
 Use `--all` to list every finding. Use `--summary` to group any report by rule. JSON output always contains the complete `findings` array and a `summary.by_rule` object.
 
+## Timings and logs
+
+Put these flags before `check`. They write to stderr, and stdout keeps the report.
+
+```bash
+rashid --timings check path/to/catalog
+rashid -vv check https://data.example.org/my-catalog/catalog.json
+rashid --trace trace.json check path/to/catalog
+```
+
+`--timings` prints the time spent in each stage. With `--json`, it adds a `meta` block with the timings and operation counts instead. `-v` and `-vv` print `INFO` and `DEBUG` log records. `--trace` writes a Chrome trace that [Perfetto](https://ui.perfetto.dev) opens. The variables `RASHID_TIMINGS`, `RASHID_LOG`, `RASHID_LOG_FILE`, and `RASHID_TRACE` do the same for `validate()` in Python.
+
 ## Choose Additional Checks
 
 rashid provides six separate validation passes:
