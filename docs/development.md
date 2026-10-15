@@ -1,6 +1,6 @@
 # Development
 
-Use this guide to set up rashid, run its checks, measure its performance, and inspect its logs. To propose a change, see the [Portolan contributing guide](https://github.com/portolan-sdi/portolan-ops/blob/main/policies/CONTRIBUTING.md).
+Use this guide to set up rashid, run checks, measure performance, and inspect logs. To propose a change, see the [Portolan contributing guide](https://github.com/portolan-sdi/portolan-ops/blob/main/policies/CONTRIBUTING.md).
 
 ## Setup
 
@@ -12,61 +12,51 @@ uv run pre-commit install \
   --hook-type pre-push
 ```
 
-The dev dependency group installs with the project. Commits follow
-[Conventional Commits](https://www.conventionalcommits.org), enforced by
-commitizen on the `commit-msg` hook.
+`uv sync` includes development dependencies. Commit messages must follow [Conventional Commits](https://www.conventionalcommits.org), which Commitizen checks through the `commit-msg` hook.
 
-## The two-stage gate
+## Local checks
 
-Hooks run in two stages, and CI reproduces both.
+Hooks run checks at commit and push time. CI runs both sets.
 
 ```bash
-# fast gate, every commit: ruff, ruff-format, codespell,
-# actionlint, zizmor, file hygiene
+# On commit: ruff, ruff-format, codespell,
+# actionlint, zizmor, and file hygiene checks
 uv run pre-commit run --all-files
 
-# full gate, every push: deptry, mypy (strict), vulture,
-# xenon (complexity), import-linter
+# On push: deptry, strict mypy, vulture,
+# xenon complexity checks, and import-linter
 uv run pre-commit run --all-files --hook-stage pre-push
 ```
 
-CI runs these with [prek](https://github.com/j178/prek) rather than
-pre-commit. Both read the same `.pre-commit-config.yaml`. A clone without
-hooks installed still faces the same checks.
+CI uses [prek](https://github.com/j178/prek) to run the same `.pre-commit-config.yaml`, so these checks apply even if you haven't installed the local hooks.
 
 ## Tests
 
-Tests carry a 90% coverage floor, and pull requests also need 90% on
-changed lines.
+Tests require at least 90% coverage overall and on lines changed by a pull request.
 
 ```bash
-uv run pytest                 # full suite
-uv run pytest -n auto         # parallelised, as CI runs it
-uv run pytest -m unit         # fast, isolated tests only
+uv run pytest                 # Full suite
+uv run pytest -n auto         # In parallel, as in CI
+uv run pytest -m unit         # Fast, isolated tests
 ```
 
-Markers are `unit`, `integration`, and `network`. The `network` tests
-probe live servers (the live pass and remote data checks) and skip
-themselves when offline; structural and schema validation run against
-the closures vendored in `src/rashid/_schemas/`, no network involved. Setting `ENABLE_PRE_PUSH_TESTS=1` adds the fast
-tests to the pre-push hook.
+Tests use the `unit`, `integration`, and `network` markers. Network tests check live servers for the live pass and remote data validation, and skip when offline. Structural and schema validation use the schema closures vendored in `src/rashid/_schemas/` and require no network access.
+
+Set `ENABLE_PRE_PUSH_TESTS=1` to include fast tests in the pre-push hook.
 
 ## Mutation testing
 
-Coverage measures which lines run. Mutation testing measures whether the
-tests notice when those lines change.
+Mutation testing checks whether tests catch changes to the code, beyond measuring which lines they run.
 
 ```bash
 uv run mutmut run
 ```
 
-CI runs this nightly against the floor in `.mutation-baseline`, currently
-72%. Ratchet that number up as the suite improves. Lowering it needs a
-justification in the pull request that does so.
+CI runs mutation tests nightly and checks the score against `.mutation-baseline`, currently 72%. Raise the minimum as tests improve. If you lower it, explain why in the pull request.
 
 ## Measuring performance
 
-Use `scripts/profile.py` to measure performance with repeatable inputs. The seeded scenarios in `tests/scenarios.py` generate the same catalogs on every run. Compare the small and large sizes to see how costs grow with catalog size.
+Use `scripts/profile.py` for repeatable performance measurements. The seeded scenarios in `tests/scenarios.py` generate the same catalogs on every run. Compare small and large scenarios to see how costs grow with catalog size.
 
 ```bash
 uv run python scripts/profile.py metadata --mode counts
@@ -116,11 +106,16 @@ Use this script for performance comparisons. Custom timing loops make results ha
 
 ## Operation counts
 
-Counters are always enabled. `tests/integration/test_operation_counts.py` asserts exact counts for each small scenario and for the large `metadata` scenario, plus a memory ceiling for the large `metadata` scenario. If your change reduces the work performed, update the expected counts in the same pull request.
+Counters are always enabled. `tests/integration/test_operation_counts.py` checks:
+
+- Exact counts for every small scenario and the large `metadata` scenario.
+- A memory ceiling for the large `metadata` scenario.
+
+If your change reduces the work performed, update the expected counts in the same pull request.
 
 `tests/unit/test_import_budget.py` checks that `import rashid` and `rashid --help` do not load the geospatial stack, jsonschema, or a profiler. Keep heavy imports inside the functions that need them.
 
-## Logs and timings on any catalog
+## Logs and timings
 
 Place logging and profiling flags before `check`:
 
@@ -153,18 +148,13 @@ For a `perf:` pull request, include before-and-after measurements under `## Veri
 
 ## CI
 
-CI logic is defined in
-[portolan-ops](https://github.com/portolan-sdi/portolan-ops) as a
-reusable workflow, and `.github/workflows/ci.yml` here is a thin caller.
-Change the shared floor there, not here. `norms/ci.md` in that repo
-covers how a change there is synced to this repo.
+The shared CI workflow lives in [portolan-ops](https://github.com/portolan-sdi/portolan-ops). This repo's `.github/workflows/ci.yml` calls it. Change shared CI requirements in portolan-ops; its `norms/ci.md` explains how changes reach this repo.
 
-`security-audit.yml` stays local. It opens a tracking issue when
-pip-audit finds a vulnerability and closes it when the audit goes clean.
+`security-audit.yml` stays in this repo. It opens a tracking issue when pip-audit finds a vulnerability and closes the issue when the audit passes.
 
 ## Releasing
 
-Commitizen reads the commits since the last tag and picks the version.
+Commitizen determines the next version from commits since the last tag.
 
 ```bash
 git checkout main && git pull
@@ -174,36 +164,32 @@ git tag -d "vX.Y.Z"
 git push -u origin release/vX.Y.Z
 ```
 
-`cz bump` rewrites `pyproject.toml`, relocks `uv.lock` through a
-pre-bump hook, writes `CHANGELOG.md`, commits as `bump:`, and tags.
-Delete the local tag: `publish.yml` tags the merged commit itself, so a
-tag on the branch commit points at the wrong one. Pass `--increment
-PATCH` to override the computed version, which is what past releases
-have done — `major_version_zero` keeps breaking changes off the major
-but still bumps the minor for a `feat`.
+Replace `X.Y.Z` with the release version. `cz bump` updates `pyproject.toml`, refreshes `uv.lock` through a pre-bump hook, writes `CHANGELOG.md`, and creates a `bump:` commit and tag.
 
-**Squash-merge the release pull request.** `publish.yml` runs only when the
-head commit message starts with `bump:`, and a merge commit reads
-`Merge pull request #N from ...`, so the run skips with no error
-anywhere and nothing reaches PyPI. Squashing puts the `bump:` title on
-`main` and the workflow tags, builds, publishes, and creates the GitHub
-release. If a release does merge the wrong way, recover with `gh
-workflow run publish.yml --ref main`, which reads the version from
-`pyproject.toml` rather than from the commit message.
+Delete the local tag as shown above. `publish.yml` creates the tag on the merged commit; the local tag points to the release branch commit.
 
-Branch protection rejects a direct push to `main` without bypass rights,
-so the pull request is the reliable route.
+To override the calculated version, pass `--increment PATCH`, as past releases have done. With `major_version_zero` enabled, breaking changes do not trigger a major release, but `feat` commits still trigger a minor release.
+
+Open a release pull request and **squash-merge it with a title that starts with `bump:`**. The publish workflow checks the head commit message for that prefix. A regular merge commit starts with `Merge pull request #N from ...`, so publishing silently skips and nothing reaches PyPI.
+
+Squash-merging puts the `bump:` title on `main`, triggering the workflow to tag, build, publish to PyPI, and create a GitHub release.
+
+If you merge the release incorrectly, run:
+
+```bash
+gh workflow run publish.yml --ref main
+```
+
+This manual run reads the version from `pyproject.toml` instead of checking the commit message.
+
+Use a pull request for releases. Branch protection blocks direct pushes to `main` unless you have bypass rights.
 
 ## Spec fixtures
 
-`SPEC_REF` records the portolan-spec commit the vendored fixtures came
-from. Re-vendor against a checkout of the spec:
+`SPEC_REF` records the portolan-spec commit used for the vendored fixtures. To refresh them from a local spec checkout, run:
 
 ```bash
 uv run python scripts/vendor_spec_fixtures.py --spec ../portolan-spec
 ```
 
-`spec-sync.yml` runs this nightly and opens a pull request when the spec
-moves. Read that pull request's test run before merging it. A red
-`test_schema_uri_invariant` means rashid needs a code change rather than a
-fixture refresh.
+`spec-sync.yml` checks for spec changes nightly and opens a pull request when it finds them. Review the test results before merging. If `test_schema_uri_invariant` fails, rashid needs a code change as well as a fixture refresh.
