@@ -63,6 +63,7 @@ DAT_PARTITION_SCHEMA = "PTL-DAT-014"
 DAT_TABULAR = "PTL-DAT-015"
 DAT_MIRROR = "PTL-DAT-016"
 DAT_VECTOR_COLUMNS = "PTL-DAT-017"
+DAT_CLASS_COLORS = "PTL-DAT-018"
 
 # Requirement IDs from the spec's requirements manifest
 # (specs/portolan/requirements.yaml) enforced by each check;
@@ -117,6 +118,12 @@ SPEC_IDS: dict[str, tuple[str, ...]] = {
     ),
     # A mirror must reproduce the collection's items (PORTO-FMT-042).
     DAT_MIRROR: ("PORTO-FMT-042",),
+    # PORTO-CORE-065 lets a COG render from source through its embedded color
+    # table, so a class color_hint that disagrees with that table promises a
+    # legend the map does not draw. The draft classified-raster text
+    # (portolan-spec#41, PORTO-FMT-054) states the match directly and replaces
+    # this citation once the vendored requirements carry it.
+    DAT_CLASS_COLORS: ("PORTO-CORE-065",),
 }
 
 # Assets are declared on collections and items; catalogs carry none.

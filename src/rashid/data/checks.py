@@ -37,6 +37,12 @@ and the real bytes into a :class:`rashid.data.DataDefect`:
   count, ids, geometry, datetime, or bbox (MUST, formats.md, Raster § Item
   mirror). A mirror runs the GeoParquet checks above as well: the spec binds
   it to them like any other spatial table.
+- ``PTL-DAT-017`` a GeoParquet data asset's columns are not documented with
+  ``table:columns`` (WARNING)
+- ``PTL-DAT-018`` a classification class's ``color_hint`` differs from the
+  color table embedded in the COG band it describes. The color table is
+  authoritative for rendering and the hint only mirrors it, so a difference is
+  a WARNING (portolan-spec#41).
 
 The four GeoParquet checks — ``PTL-DAT-006``, ``007``, ``008``, and ``012`` —
 run over an asset and over every file a local relative ``partition:glob``
@@ -92,6 +98,7 @@ from rashid._multihash import decode_multihash
 from rashid.catalog import CatalogGraph, Node
 from rashid.data import (
     DAT_CHECKSUM,
+    DAT_CLASS_COLORS,
     DAT_COG,
     DAT_COG_STATS,
     DAT_CONSISTENCY,
@@ -112,6 +119,7 @@ from rashid.data import (
 )
 from rashid.data.reader import AssetReader, Locator
 from rashid.model import Severity
+from rashid.rules.classification import asset_class_lists
 from rashid.rules.item_mirror import is_mirror_asset
 
 # Multihash function code -> hashlib algorithm name.
@@ -415,7 +423,7 @@ def _check_asset(
             # being scoped to assets with the 'data' role.
             defects.extend(_check_mirror(node, key, files, graph))
         if expected == "tiff":
-            defects.extend(_check_raster(key, located, files))
+            defects.extend(_check_raster(key, asset, located, files))
         if expected == "parquet":
             defects.extend(_check_geoparquet(key, files))
             defects.extend(_check_tabular(node, key, asset, files))
@@ -638,11 +646,13 @@ def _verify_format(key: str, expected: str | None, head: bytes) -> list[DataDefe
     ]
 
 
-def _check_raster(key: str, located: Locator, files: _AssetFiles) -> list[DataDefect]:
+def _check_raster(
+    key: str, asset: dict[str, Any], located: Locator, files: _AssetFiles
+) -> list[DataDefect]:
     """A raster asset MUST be a valid COG (formats.md:91) with embedded band stats.
 
     ``cog_validate`` takes a path, not a dataset, so it opens the file itself.
-    The other three checks share the one dataset in ``files``.
+    The other checks share the one dataset in ``files``.
     """
     defects: list[DataDefect] = []
     try:
@@ -674,6 +684,84 @@ def _check_raster(key: str, located: Locator, files: _AssetFiles) -> list[DataDe
         defects.extend(_check_cog_stats(key, files))
         defects.extend(_check_overviews(key, files))
         defects.extend(_check_tile_size(key, files))
+        defects.extend(_check_class_colors(key, asset, files))
+    return defects
+
+
+def _hinted_classes(asset: dict[str, Any]) -> Iterator[tuple[int | None, int, str, str]]:
+    """(file band, class value, field pointer, hint) for each comparable class.
+
+    A band list's classes describe the file band at the same position. An
+    asset-level list has no band (None) and describes the asset's only band,
+    so it is compared only against a single-band file. A nodata class
+    is skipped, since its pixels draw transparent whatever the table says, and
+    so is a malformed value or hint, which ``PTL-CLS-002`` reports.
+    """
+    for found in asset_class_lists("", asset):
+        band = None if found.band_index is None else found.band_index + 1
+        for pointer, entry in found.entries():
+            value, hint = entry.get("value"), entry.get("color_hint")
+            if entry.get("nodata") is True or isinstance(value, bool) or not isinstance(value, int):
+                continue
+            if isinstance(hint, str) and _COLOR_HINT.match(hint):
+                yield band, value, pointer.lstrip("/"), hint.upper()
+
+
+_COLOR_HINT = re.compile(r"^[0-9A-Fa-f]{6}$")
+
+
+def _check_class_colors(key: str, asset: dict[str, Any], files: _AssetFiles) -> list[DataDefect]:
+    """A class's ``color_hint`` SHOULD equal its band's embedded color table entry.
+
+    The color table (the TIFF ``ColorMap`` tag) is what any TIFF reader draws,
+    so it wins, and a differing hint is a WARNING that the legend a client
+    builds from STAC will not match the map. A band with no color table has
+    nothing to compare. A TIFF color table holds an entry for every value the
+    band's type can take, so any other class always has one.
+    """
+    hinted = list(_hinted_classes(asset))
+    if not hinted:
+        return []
+    try:
+        src = files.raster()
+        tables: dict[int, dict[int, tuple[int, ...]] | None] = {}
+        defects: list[DataDefect] = []
+        for band, value, field, hint in hinted:
+            if band is None:
+                band = 1 if src.count == 1 else None
+            if band is None or band > src.count:
+                continue
+            if band not in tables:
+                try:
+                    tables[band] = src.colormap(band)
+                except ValueError:  # the band carries no color table
+                    tables[band] = None
+            entry = (tables[band] or {}).get(value)
+            if entry is None:
+                continue
+            actual = "{:02X}{:02X}{:02X}".format(*entry[:3])
+            if actual != hint:
+                defects.append(
+                    DataDefect(
+                        DAT_CLASS_COLORS,
+                        Severity.WARNING,
+                        f"asset '{key}' class value {value} has color_hint '{hint}', but band"
+                        f" {band}'s embedded color table draws it as '{actual}'",
+                        key,
+                        f"{field}/color_hint",
+                        expected=actual,
+                        actual=hint,
+                    )
+                )
+    except Exception as exc:  # noqa: BLE001 - unreadable raster is advisory here
+        return [
+            DataDefect(
+                DAT_CLASS_COLORS,
+                Severity.INFO,
+                f"asset '{key}' color table could not be read ({exc})",
+                key,
+            )
+        ]
     return defects
 
 

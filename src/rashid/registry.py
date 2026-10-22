@@ -178,6 +178,10 @@ _PASS_CHECKS: dict[str, tuple[Severity, str]] = {
         Severity.WARNING,
         "a GeoParquet data asset's columns are documented with table:columns",
     ),
+    "PTL-DAT-018": (
+        Severity.WARNING,
+        "a classification class's color_hint matches the COG's embedded color table",
+    ),
     "PTL-LIV-000": (
         Severity.WARNING,
         "the live pass could reach a host to probe",
