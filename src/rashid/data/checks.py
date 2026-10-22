@@ -711,14 +711,15 @@ def _classified_asset(
     return template if isinstance(template, dict) and asset_class_lists("", template) else asset
 
 
-def _hinted_classes(asset: dict[str, Any]) -> Iterator[tuple[int | None, int, str, str]]:
-    """(file band, class value, field pointer, hint) for each comparable class.
+def _drawn_classes(asset: dict[str, Any]) -> Iterator[tuple[int | None, int, str, str | None]]:
+    """(file band, class value, field pointer, hint) for each class a reader draws.
 
     A band list's classes describe the file band at the same position. An
     asset-level list has no band (None) and describes the asset's only band,
-    so it is compared only against a single-band file. A nodata class
-    is skipped, since its pixels draw transparent whatever the table says, and
-    so is a malformed value or hint, which ``PTL-CLS-002`` reports.
+    so it is compared only against a single-band file. A nodata class is
+    skipped, since its pixels draw transparent whatever the table says, and so
+    is a malformed value, which ``PTL-CLS-002`` reports. A malformed hint
+    becomes None for the same reason.
     """
     for found in asset_class_lists("", asset):
         band = None if found.band_index is None else found.band_index + 1
@@ -726,31 +727,77 @@ def _hinted_classes(asset: dict[str, Any]) -> Iterator[tuple[int | None, int, st
             value, hint = entry.get("value"), entry.get("color_hint")
             if entry.get("nodata") is True or isinstance(value, bool) or not isinstance(value, int):
                 continue
-            if isinstance(hint, str) and _COLOR_HINT.match(hint):
-                yield band, value, pointer.lstrip("/"), hint.upper()
+            valid = hint.upper() if isinstance(hint, str) and _COLOR_HINT.match(hint) else None
+            yield band, value, pointer.lstrip("/"), valid
 
 
 _COLOR_HINT = re.compile(r"^[0-9A-Fa-f]{6}$")
 _BITFIELDS = "classification:bitfields"
 
 
+def _class_color_defect(
+    key: str,
+    band: int,
+    value: int,
+    field: str,
+    hint: str | None,
+    entry: tuple[int, ...] | None,
+) -> DataDefect | None:
+    """The WARNING one drawn class earns against its band's color table, if any."""
+    if entry is None:
+        return DataDefect(
+            DAT_CLASS_COLORS,
+            Severity.WARNING,
+            f"asset '{key}' class value {value} has no entry in band {band}'s embedded"
+            " color table, so readers cannot draw it",
+            key,
+            f"{field}/value",
+        )
+    if len(entry) > 3 and entry[3] == 0:
+        return DataDefect(
+            DAT_CLASS_COLORS,
+            Severity.WARNING,
+            f"asset '{key}' class value {value} is fully transparent in band {band}'s"
+            " embedded color table, so readers hide it like nodata",
+            key,
+            f"{field}/nodata",
+            expected=True,
+        )
+    actual = "{:02X}{:02X}{:02X}".format(*entry[:3])
+    if hint is None or actual == hint:
+        return None
+    return DataDefect(
+        DAT_CLASS_COLORS,
+        Severity.WARNING,
+        f"asset '{key}' class value {value} has color_hint '{hint}', but band"
+        f" {band}'s embedded color table draws it as '{actual}'",
+        key,
+        f"{field}/color_hint",
+        expected=actual,
+        actual=hint,
+    )
+
+
 def _check_class_colors(key: str, asset: dict[str, Any], files: _AssetFiles) -> list[DataDefect]:
-    """A class's ``color_hint`` SHOULD equal its band's embedded color table entry.
+    """A class SHOULD agree with its band's embedded color table.
 
     The color table (the TIFF ``ColorMap`` tag) is what any TIFF reader draws,
-    so it wins, and a differing hint is a WARNING that the legend a client
-    builds from STAC will not match the map. A band with no color table has
-    nothing to compare. A TIFF color table holds an entry for every value the
-    band's type can take, so any other class always has one.
+    so it wins. A class the table cannot draw (a value past a short table), a
+    class the table draws fully transparent although it is not marked
+    ``nodata``, and a ``color_hint`` whose red, green and blue differ from the
+    table entry are each a WARNING that the legend a client builds from STAC
+    will not match the map. Alpha is compared only for full transparency,
+    since a hint carries none. A band with no color table has nothing to
+    compare.
     """
-    hinted = list(_hinted_classes(asset))
-    if not hinted:
+    drawn = list(_drawn_classes(asset))
+    if not drawn:
         return []
     try:
         src = files.raster()
         tables: dict[int, dict[int, tuple[int, ...]] | None] = {}
         defects: list[DataDefect] = []
-        for band, value, field, hint in hinted:
+        for band, value, field, hint in drawn:
             if band is None:
                 band = 1 if src.count == 1 else None
             if band is None or band > src.count:
@@ -760,23 +807,12 @@ def _check_class_colors(key: str, asset: dict[str, Any], files: _AssetFiles) -> 
                     tables[band] = src.colormap(band)
                 except ValueError:  # the band carries no color table
                     tables[band] = None
-            entry = (tables[band] or {}).get(value)
-            if entry is None:
+            table = tables[band]
+            if table is None:
                 continue
-            actual = "{:02X}{:02X}{:02X}".format(*entry[:3])
-            if actual != hint:
-                defects.append(
-                    DataDefect(
-                        DAT_CLASS_COLORS,
-                        Severity.WARNING,
-                        f"asset '{key}' class value {value} has color_hint '{hint}', but band"
-                        f" {band}'s embedded color table draws it as '{actual}'",
-                        key,
-                        f"{field}/color_hint",
-                        expected=actual,
-                        actual=hint,
-                    )
-                )
+            defect = _class_color_defect(key, band, value, field, hint, table.get(value))
+            if defect is not None:
+                defects.append(defect)
     except Exception as exc:  # noqa: BLE001 - unreadable raster is advisory here
         return [
             DataDefect(

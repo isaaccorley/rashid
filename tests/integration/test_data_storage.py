@@ -1253,6 +1253,43 @@ def test_malformed_hint_is_left_to_the_metadata_rule(tmp_path: Path) -> None:
     assert _raster(path, _classified_asset(flood="#FF0000")) == []
 
 
+def test_class_drawn_transparent_must_be_marked_nodata(tmp_path: Path) -> None:
+    # The table hides value 0 (the file's nodata), so a class 0 that is not
+    # marked nodata appears in the legend but never on the map.
+    path = tmp_path / "flood.tif"
+    assets.write_cog(path, nodata=0, colormap=_FLOOD_TABLE)
+    asset = _classified_asset()
+    del asset["bands"][0]["classification:classes"][0]["nodata"]
+    defects = _raster(path, asset)
+    assert [(d.rule_id, d.severity, d.field) for d in defects] == [
+        (DAT_CLASS_COLORS, Severity.WARNING, "bands/0/classification:classes/0/nodata")
+    ]
+
+
+class _ShortTable:
+    """A one-band raster whose color table stops short, as an NBITS=4 file's does."""
+
+    count = 1
+    colorinterp = ()
+
+    def colormap(self, band: int) -> dict[int, tuple[int, ...]]:
+        return dict.fromkeys(range(16), (0, 0, 0, 255))
+
+
+class _ShortTableFiles:
+    def raster(self) -> _ShortTable:
+        return _ShortTable()
+
+
+def test_class_past_a_short_color_table_is_a_warning() -> None:
+    classes = [{"value": 3, "name": "flood"}, {"value": 20, "name": "beyond"}]
+    asset = {"bands": [{"classification:classes": classes}]}
+    defects = checks._check_class_colors("data", asset, _ShortTableFiles())  # type: ignore[arg-type]
+    assert [(d.rule_id, d.field) for d in defects] == [
+        (DAT_CLASS_COLORS, "bands/0/classification:classes/1/value")
+    ]
+
+
 def test_palette_band_without_classes_is_a_warning(tmp_path: Path) -> None:
     path = tmp_path / "flood.tif"
     assets.write_cog(path, nodata=0, colormap=_FLOOD_TABLE)
