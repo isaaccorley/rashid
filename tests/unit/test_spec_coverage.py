@@ -82,6 +82,11 @@ _SEVERITY_EXCEPTIONS: dict[str, str] = {
     # The table is authoritative for rendering, so the spec pins a mismatch
     # to a warning (PTL-DAT-018).
     "PORTO-FMT-054": "spec pins a color_hint and color table mismatch to a warning",
+    # formats.md, Raster, Classified rasters: "A class whose value is the
+    # band's nodata MUST be marked nodata: true." Rashid compares the class
+    # with the nodata the file declares, and warns rather than errs while
+    # catalogs adopt classes (PTL-DAT-018). Raise it to an error once they do.
+    "PORTO-FMT-060": "a class at the file's nodata is warned about during adoption",
 }
 
 _RANK = {Severity.INFO: 0, Severity.WARNING: 1, Severity.ERROR: 2}

@@ -121,7 +121,9 @@ SPEC_IDS: dict[str, tuple[str, ...]] = {
     DAT_MIRROR: ("PORTO-FMT-042",),
     # A class color_hint must equal the embedded color table entry, and tools
     # warn when they differ (PORTO-FMT-055 pins the finding to a warning).
-    DAT_CLASS_COLORS: ("PORTO-FMT-054",),
+    # A class at the file's nodata value must be marked nodata
+    # (PORTO-FMT-060), warned about for now while catalogs adopt classes.
+    DAT_CLASS_COLORS: ("PORTO-FMT-054", "PORTO-FMT-060"),
     # A palette band only hints at classes. Continuous rasters ship color
     # tables too, so whether a raster is classified is the producer's
     # declaration (PORTO-FMT-049 is enforcement: process) and this INFO hint
