@@ -1317,12 +1317,12 @@ def test_class_past_a_short_color_table_is_a_warning() -> None:
     ]
 
 
-def test_palette_band_without_classes_is_a_warning(tmp_path: Path) -> None:
+def test_palette_band_without_classes_is_an_info_hint(tmp_path: Path) -> None:
     path = tmp_path / "flood.tif"
     assets.write_cog(path, nodata=0, colormap=_FLOOD_TABLE)
     defects = _raster(path, {"bands": [{"nodata": 0, "data_type": "uint8"}]})
     assert [(d.rule_id, d.severity, d.field) for d in defects] == [
-        (DAT_PALETTE_CLASSES, Severity.WARNING, "bands/0")
+        (DAT_PALETTE_CLASSES, Severity.INFO, "bands/0")
     ]
 
 

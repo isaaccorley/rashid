@@ -25,7 +25,7 @@ included:
 
 Whether a ``color_hint`` agrees with the colour table embedded in the COG
 (``PTL-DAT-018``), and whether a palette band has classes at all
-(``PTL-DAT-019``), are bytes questions, so they live in the data pass, which
+(``PTL-DAT-019``, an INFO hint), are bytes questions, so they live in the data pass, which
 reads the lists through :func:`asset_class_lists`.
 """
 

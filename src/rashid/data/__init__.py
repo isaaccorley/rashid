@@ -122,8 +122,11 @@ SPEC_IDS: dict[str, tuple[str, ...]] = {
     # A class color_hint must equal the embedded color table entry, and tools
     # warn when they differ (PORTO-FMT-055 pins the finding to a warning).
     DAT_CLASS_COLORS: ("PORTO-FMT-054",),
-    # A palette band is the file's own signal that its pixels are classes.
-    DAT_PALETTE_CLASSES: ("PORTO-FMT-049",),
+    # A palette band only hints at classes. Continuous rasters ship color
+    # tables too, so whether a raster is classified is the producer's
+    # declaration (PORTO-FMT-049 is enforcement: process) and this INFO hint
+    # cites nothing.
+    DAT_PALETTE_CLASSES: (),
 }
 
 # Assets are declared on collections and items; catalogs carry none.

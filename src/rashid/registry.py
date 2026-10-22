@@ -183,7 +183,7 @@ _PASS_CHECKS: dict[str, tuple[Severity, str]] = {
         "a classification class agrees with the COG band it describes",
     ),
     "PTL-DAT-019": (
-        Severity.WARNING,
+        Severity.INFO,
         "a COG band with an embedded color table declares classification:classes",
     ),
     "PTL-LIV-000": (

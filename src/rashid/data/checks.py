@@ -39,13 +39,14 @@ and the real bytes into a :class:`rashid.data.DataDefect`:
   it to them like any other spatial table.
 - ``PTL-DAT-017`` a GeoParquet data asset's columns are not documented with
   ``table:columns`` (WARNING)
-- ``PTL-DAT-018`` a classification class's ``color_hint`` differs from the
-  color table embedded in the COG band it describes. The color table is
-  authoritative for rendering and the hint only mirrors it, so a difference is
-  a WARNING (PORTO-FMT-054, PORTO-FMT-055).
+- ``PTL-DAT-018`` a classification class disagrees with the COG band it
+  describes, such as a ``color_hint`` that differs from the embedded color
+  table. The color table is authoritative for rendering and the hint only
+  mirrors it, so a difference is a WARNING (PORTO-FMT-054, PORTO-FMT-055).
 - ``PTL-DAT-019`` a COG band drawn through an embedded color table declares no
-  ``classification:classes`` (WARNING, PORTO-FMT-049). An item asset with no
-  classes of its own is read with its collection's ``item_assets`` template.
+  ``classification:classes`` (INFO, uncited). A palette is only a hint, since
+  continuous rasters ship one too. An item asset with no classes of its own is
+  read with its collection's ``item_assets`` template.
 
 The four GeoParquet checks — ``PTL-DAT-006``, ``007``, ``008``, and ``012`` —
 run over an asset and over every file a local relative ``partition:glob``
@@ -866,11 +867,13 @@ def _check_class_colors(key: str, asset: dict[str, Any], files: _AssetFiles) -> 
 
 
 def _check_palette_classes(key: str, asset: dict[str, Any], files: _AssetFiles) -> list[DataDefect]:
-    """A band drawn through a color table SHOULD name its classes.
+    """A band drawn through a color table may be classified without saying so.
 
-    A palette band (an embedded TIFF ``ColorMap``) is the file's own signal
-    that its pixels are categories. Without ``classification:classes`` a
-    client can draw it but cannot say what any color means.
+    A palette band (an embedded TIFF ``ColorMap``) often holds categories, and
+    without ``classification:classes`` a client can draw it but cannot say
+    what any color means. A palette does not prove it, though (JRC water
+    occurrence is a continuous percentage with one), and only the producer
+    can declare a raster classified (PORTO-FMT-049), so this is an INFO hint.
     """
     described = {
         0 if found.band_index is None else found.band_index
@@ -897,7 +900,7 @@ def _check_palette_classes(key: str, asset: dict[str, Any], files: _AssetFiles) 
     return [
         DataDefect(
             DAT_PALETTE_CLASSES,
-            Severity.WARNING,
+            Severity.INFO,
             f"asset '{key}' band {index + 1} draws through an embedded color table but"
             " declares no classification:classes",
             key,
