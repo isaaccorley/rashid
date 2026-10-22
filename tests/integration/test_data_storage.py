@@ -19,6 +19,8 @@ pytest.importorskip("rasterio")
 pytest.importorskip("rio_cogeo")
 
 import pyarrow.parquet as pq  # noqa: E402
+import rasterio  # noqa: E402
+from rasterio.enums import ColorInterp  # noqa: E402
 
 import rashid.data.checks as checks  # noqa: E402
 from rashid.catalog import CatalogGraph, Node  # noqa: E402
@@ -1266,11 +1268,36 @@ def test_class_drawn_transparent_must_be_marked_nodata(tmp_path: Path) -> None:
     ]
 
 
+def test_class_equal_to_file_nodata_without_a_table_is_a_warning(tmp_path: Path) -> None:
+    # Sentinel-2 SCL style: class 0 is the file's nodata and no table exists.
+    path = tmp_path / "scl.tif"
+    assets.write_cog(path, nodata=0)
+    classes = [{"value": 0, "name": "no-data"}, {"value": 4, "name": "vegetation"}]
+    defects = _raster(path, {"bands": [{"nodata": 0, "classification:classes": classes}]})
+    assert [(d.rule_id, d.field) for d in defects] == [
+        (DAT_CLASS_COLORS, "bands/0/classification:classes/0/nodata")
+    ]
+
+
+def test_classes_on_a_picture_channel_are_a_warning(tmp_path: Path) -> None:
+    path = tmp_path / "visual.tif"
+    assets.write_cog(path)
+    with rasterio.open(path, "r+", IGNORE_COG_LAYOUT_BREAK="YES") as dst:
+        dst.colorinterp = [ColorInterp.red]
+    classes = [{"value": 1, "name": "a"}, {"value": 2, "name": "b"}]
+    # Rewriting the header breaks the COG layout, which other rules report.
+    defects = _raster(path, {"bands": [{"classification:classes": classes}]})
+    assert [(d.rule_id, d.field) for d in defects if d.rule_id == DAT_CLASS_COLORS] == [
+        (DAT_CLASS_COLORS, "bands/0/classification:classes")
+    ]
+
+
 class _ShortTable:
     """A one-band raster whose color table stops short, as an NBITS=4 file's does."""
 
     count = 1
-    colorinterp = ()
+    colorinterp = (ColorInterp.palette,)
+    nodatavals = (None,)
 
     def colormap(self, band: int) -> dict[int, tuple[int, ...]]:
         return dict.fromkeys(range(16), (0, 0, 0, 255))

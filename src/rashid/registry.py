@@ -180,7 +180,7 @@ _PASS_CHECKS: dict[str, tuple[Severity, str]] = {
     ),
     "PTL-DAT-018": (
         Severity.WARNING,
-        "a classification class's color_hint matches the COG's embedded color table",
+        "a classification class agrees with the COG band it describes",
     ),
     "PTL-DAT-019": (
         Severity.WARNING,

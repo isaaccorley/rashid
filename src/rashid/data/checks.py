@@ -778,17 +778,37 @@ def _class_color_defect(
     )
 
 
-def _check_class_colors(key: str, asset: dict[str, Any], files: _AssetFiles) -> list[DataDefect]:
-    """A class SHOULD agree with its band's embedded color table.
+_PICTURE = frozenset({ColorInterp.red, ColorInterp.green, ColorInterp.blue, ColorInterp.alpha})
 
-    The color table (the TIFF ``ColorMap`` tag) is what any TIFF reader draws,
-    so it wins. A class the table cannot draw (a value past a short table), a
-    class the table draws fully transparent although it is not marked
-    ``nodata``, and a ``color_hint`` whose red, green and blue differ from the
-    table entry are each a WARNING that the legend a client builds from STAC
-    will not match the map. Alpha is compared only for full transparency,
-    since a hint carries none. A band with no color table has nothing to
-    compare.
+
+def _picture_defect(key: str, band: int, field: str) -> DataDefect:
+    """The WARNING for a class list on one channel of an RGB(A) picture."""
+    return DataDefect(
+        DAT_CLASS_COLORS,
+        Severity.WARNING,
+        f"asset '{key}' band {band} is a color channel of a picture, so its pixels are"
+        " intensities, not the classes it declares",
+        key,
+        field,
+    )
+
+
+def _check_class_colors(key: str, asset: dict[str, Any], files: _AssetFiles) -> list[DataDefect]:
+    """A class SHOULD agree with the COG band it describes.
+
+    Each disagreement is a WARNING that the legend a client builds from STAC
+    will not match the map.
+
+    - A class list on a red, green, blue or alpha band describes one channel
+      of a picture, whose pixels are intensities, not categories.
+    - A class whose value is the file's nodata is masked by every reader, so
+      it must be marked ``nodata`` to agree with the file.
+    - On a band with an embedded color table (the TIFF ``ColorMap`` tag),
+      which any TIFF reader draws and which therefore wins, a class the table
+      cannot draw (a value past a short table), a class drawn fully
+      transparent, and a ``color_hint`` whose red, green and blue differ from
+      the table entry. Alpha is compared only for full transparency, since a
+      hint carries none.
     """
     drawn = list(_drawn_classes(asset))
     if not drawn:
@@ -796,6 +816,7 @@ def _check_class_colors(key: str, asset: dict[str, Any], files: _AssetFiles) -> 
     try:
         src = files.raster()
         tables: dict[int, dict[int, tuple[int, ...]] | None] = {}
+        pictures: set[int] = set()
         defects: list[DataDefect] = []
         for band, value, field, hint in drawn:
             if band is None:
@@ -807,6 +828,25 @@ def _check_class_colors(key: str, asset: dict[str, Any], files: _AssetFiles) -> 
                     tables[band] = src.colormap(band)
                 except ValueError:  # the band carries no color table
                     tables[band] = None
+            if src.colorinterp[band - 1] in _PICTURE:
+                if band not in pictures:
+                    pictures.add(band)
+                    defects.append(_picture_defect(key, band, field.rsplit("/", 1)[0]))
+                continue
+            nodata = src.nodatavals[band - 1]
+            if nodata is not None and nodata == value:
+                defects.append(
+                    DataDefect(
+                        DAT_CLASS_COLORS,
+                        Severity.WARNING,
+                        f"asset '{key}' class value {value} is band {band}'s nodata in the file,"
+                        " so readers hide it, but the class is not marked nodata",
+                        key,
+                        f"{field}/nodata",
+                        expected=True,
+                    )
+                )
+                continue
             table = tables[band]
             if table is None:
                 continue
