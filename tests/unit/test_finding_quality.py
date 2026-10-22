@@ -75,6 +75,7 @@ _COVERED: frozenset[str] = frozenset(
         "PTL-CLS-002",
         "PTL-CLS-003",
         "PTL-CLS-004",
+        "PTL-CLS-005",
         "PTL-CNF-001",
         "PTL-CNF-003",
         "PTL-COL-001",
@@ -220,8 +221,9 @@ def _add_collections(catalog: CatalogBuilder) -> None:
     )
 
     # A classified raster band that declares no classification extension, a
-    # malformed class name, a nodata class off the band's nodata, and a value
-    # its uint8 band cannot hold.
+    # malformed class name, a nodata class off the band's nodata, a value its
+    # uint8 band cannot hold, and a legacy raster:bands list with no class list
+    # on the matching STAC 1.1 band.
     catalog.collection(
         "classified",
         assets={
@@ -240,6 +242,20 @@ def _add_collections(catalog: CatalogBuilder) -> None:
                         ],
                     }
                 ],
+                **{
+                    "raster:bands": [
+                        {
+                            "classification:classes": [
+                                {"value": 1, "name": "unchanged", "title": "Unchanged"}
+                            ]
+                        },
+                        {
+                            "classification:classes": [
+                                {"value": 2, "name": "water", "title": "Water"}
+                            ]
+                        },
+                    ]
+                },
             ),
         },
     )

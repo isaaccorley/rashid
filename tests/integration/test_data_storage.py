@@ -21,7 +21,7 @@ pytest.importorskip("rio_cogeo")
 import pyarrow.parquet as pq  # noqa: E402
 
 import rashid.data.checks as checks  # noqa: E402
-from rashid.catalog import Node  # noqa: E402
+from rashid.catalog import CatalogGraph, Node  # noqa: E402
 from rashid.data import (  # noqa: E402
     DAT_CLASS_COLORS,
     DAT_COG,
@@ -29,6 +29,7 @@ from rashid.data import (  # noqa: E402
     DAT_GEOPARQUET_VERSION,
     DAT_ORDERING,
     DAT_OVERVIEWS,
+    DAT_PALETTE_CLASSES,
     DAT_PARTITION_SCHEMA,
     DAT_ROWGROUP_SIZE,
     DAT_ROWGROUP_STATS,
@@ -39,6 +40,7 @@ from rashid.data import (  # noqa: E402
 )
 from rashid.data.reader import Locator  # noqa: E402
 from rashid.model import Severity  # noqa: E402
+from tests.conftest import CatalogBuilder, mutate_json  # noqa: E402
 from tests.integration import _data_assets as assets  # noqa: E402
 
 pytestmark = pytest.mark.integration
@@ -1249,6 +1251,46 @@ def test_malformed_hint_is_left_to_the_metadata_rule(tmp_path: Path) -> None:
     path = tmp_path / "flood.tif"
     assets.write_cog(path, nodata=0, colormap=_FLOOD_TABLE)
     assert _raster(path, _classified_asset(flood="#FF0000")) == []
+
+
+def test_palette_band_without_classes_is_a_warning(tmp_path: Path) -> None:
+    path = tmp_path / "flood.tif"
+    assets.write_cog(path, nodata=0, colormap=_FLOOD_TABLE)
+    defects = _raster(path, {"bands": [{"nodata": 0, "data_type": "uint8"}]})
+    assert [(d.rule_id, d.severity, d.field) for d in defects] == [
+        (DAT_PALETTE_CLASSES, Severity.WARNING, "bands/0")
+    ]
+
+
+def test_palette_band_described_by_bitfields_is_clean(tmp_path: Path) -> None:
+    path = tmp_path / "qa.tif"
+    assets.write_cog(path, nodata=0, colormap=_FLOOD_TABLE)
+    bitfields = [{"offset": 0, "length": 1, "classes": [{"value": 1, "name": "cloud"}]}]
+    assert _raster(path, {"bands": [{"classification:bitfields": bitfields}]}) == []
+
+
+def test_asset_level_classes_describe_a_palette_band(tmp_path: Path) -> None:
+    path = tmp_path / "flood.tif"
+    assets.write_cog(path, nodata=0, colormap=_FLOOD_TABLE)
+    classes = [{"value": 1, "name": "unchanged", "title": "Unchanged"}]
+    assert _raster(path, {"classification:classes": classes}) == []
+
+
+def test_item_asset_inherits_classes_from_item_assets(catalog: CatalogBuilder) -> None:
+    catalog.collection("flood").item("scene-1")
+    root = catalog.write()
+    template = _classified_asset()
+    mutate_json(
+        root / "flood" / "collection.json",
+        lambda data: data.update(item_assets={"data": template}),
+    )
+    graph = CatalogGraph.load(root)
+    item = next(graph.iter("item"))
+    own = {"href": "./flood.tif"}
+    assert checks._classified_asset(item, "data", own, graph) == template
+    assert checks._classified_asset(item, "other", own, graph) is own
+    collection = next(graph.iter("collection"))
+    assert checks._classified_asset(collection, "data", own, graph) is own
 
 
 def test_unreadable_color_table_is_info(tmp_path: Path) -> None:

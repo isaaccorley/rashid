@@ -24,6 +24,7 @@ from rashid.data import (
     DAT_MIRROR,
     DAT_ORDERING,
     DAT_OVERVIEWS,
+    DAT_PALETTE_CLASSES,
     DAT_PARTITION_SCHEMA,
     DAT_ROWGROUP_SIZE,
     DAT_ROWGROUP_STATS,
@@ -104,6 +105,7 @@ _DATA_RULE_IDS = frozenset(
         DAT_MIRROR,
         DAT_VECTOR_COLUMNS,
         DAT_CLASS_COLORS,
+        DAT_PALETTE_CLASSES,
     }
 )
 

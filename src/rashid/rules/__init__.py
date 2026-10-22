@@ -16,9 +16,11 @@ from rashid.rules.assets import (
 from rashid.rules.bbox import BboxValidRule
 from rashid.rules.catalogs import SubcatalogFanoutRule
 from rashid.rules.classification import (
+    BandPlacementRule,
     ClassificationExtensionRule,
     ClassListRule,
     ClassValueRangeRule,
+    ItemAssetClassesRule,
     NodataClassRule,
 )
 from rashid.rules.collections import (
@@ -129,6 +131,8 @@ DEFAULT_RULES: tuple[Rule, ...] = (
     ClassListRule(),
     NodataClassRule(),
     ClassValueRangeRule(),
+    BandPlacementRule(),
+    ItemAssetClassesRule(),
     SingleFileCollectionRule(),
     RasterSceneItemRule(),
     MissingItemTreeRule(),

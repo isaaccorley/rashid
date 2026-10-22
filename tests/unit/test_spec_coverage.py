@@ -76,6 +76,12 @@ _SEVERITY_EXCEPTIONS: dict[str, str] = {
     # Same clause: PORTO-CORE-040's own MUST ("it MUST flag") is discharged by
     # PTL-TTL-002 flagging at the warning severity the sentence prescribes.
     "PORTO-CORE-040": "spec pins the heuristic readability finding to a warning",
+    # formats.md, Raster, Classified rasters: "each class color_hint MUST
+    # equal the red, green, and blue components of the color table entry for
+    # that class value. Tools that read both SHOULD warn when they differ."
+    # The table is authoritative for rendering, so the spec pins a mismatch
+    # to a warning (PTL-DAT-018).
+    "PORTO-FMT-054": "spec pins a color_hint and color table mismatch to a warning",
 }
 
 _RANK = {Severity.INFO: 0, Severity.WARNING: 1, Severity.ERROR: 2}

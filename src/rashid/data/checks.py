@@ -42,7 +42,10 @@ and the real bytes into a :class:`rashid.data.DataDefect`:
 - ``PTL-DAT-018`` a classification class's ``color_hint`` differs from the
   color table embedded in the COG band it describes. The color table is
   authoritative for rendering and the hint only mirrors it, so a difference is
-  a WARNING (portolan-spec#41).
+  a WARNING (PORTO-FMT-054, PORTO-FMT-055).
+- ``PTL-DAT-019`` a COG band drawn through an embedded color table declares no
+  ``classification:classes`` (WARNING, PORTO-FMT-049). An item asset with no
+  classes of its own is read with its collection's ``item_assets`` template.
 
 The four GeoParquet checks — ``PTL-DAT-006``, ``007``, ``008``, and ``012`` —
 run over an asset and over every file a local relative ``partition:glob``
@@ -87,6 +90,7 @@ import pyarrow.parquet as pq
 import rasterio
 import shapely
 from pyproj import CRS, Transformer
+from rasterio.enums import ColorInterp
 from rio_cogeo.cogeo import cog_validate
 from shapely import from_wkb
 from shapely.errors import ShapelyError
@@ -107,6 +111,7 @@ from rashid.data import (
     DAT_MIRROR,
     DAT_ORDERING,
     DAT_OVERVIEWS,
+    DAT_PALETTE_CLASSES,
     DAT_PARTITION_SCHEMA,
     DAT_ROWGROUP_SIZE,
     DAT_ROWGROUP_STATS,
@@ -119,7 +124,7 @@ from rashid.data import (
 )
 from rashid.data.reader import AssetReader, Locator
 from rashid.model import Severity
-from rashid.rules.classification import asset_class_lists
+from rashid.rules.classification import BAND_FIELDS, asset_class_lists
 from rashid.rules.item_mirror import is_mirror_asset
 
 # Multihash function code -> hashlib algorithm name.
@@ -423,7 +428,8 @@ def _check_asset(
             # being scoped to assets with the 'data' role.
             defects.extend(_check_mirror(node, key, files, graph))
         if expected == "tiff":
-            defects.extend(_check_raster(key, asset, located, files))
+            classed = _classified_asset(node, key, asset, graph)
+            defects.extend(_check_raster(key, classed, located, files))
         if expected == "parquet":
             defects.extend(_check_geoparquet(key, files))
             defects.extend(_check_tabular(node, key, asset, files))
@@ -685,7 +691,24 @@ def _check_raster(
         defects.extend(_check_overviews(key, files))
         defects.extend(_check_tile_size(key, files))
         defects.extend(_check_class_colors(key, asset, files))
+        defects.extend(_check_palette_classes(key, asset, files))
     return defects
+
+
+def _classified_asset(
+    node: Node, key: str, asset: dict[str, Any], graph: CatalogGraph | None
+) -> dict[str, Any]:
+    """The asset whose class lists describe this file.
+
+    An item asset that declares no classes inherits the ones its collection's
+    ``item_assets`` template declares for the same key.
+    """
+    if asset_class_lists("", asset) or node.kind != "item" or graph is None:
+        return asset
+    collection = graph.enclosing_collection_of(node)
+    templates = collection.data.get("item_assets") if collection is not None else None
+    template = templates.get(key) if isinstance(templates, dict) else None
+    return template if isinstance(template, dict) and asset_class_lists("", template) else asset
 
 
 def _hinted_classes(asset: dict[str, Any]) -> Iterator[tuple[int | None, int, str, str]]:
@@ -708,6 +731,7 @@ def _hinted_classes(asset: dict[str, Any]) -> Iterator[tuple[int | None, int, st
 
 
 _COLOR_HINT = re.compile(r"^[0-9A-Fa-f]{6}$")
+_BITFIELDS = "classification:bitfields"
 
 
 def _check_class_colors(key: str, asset: dict[str, Any], files: _AssetFiles) -> list[DataDefect]:
@@ -763,6 +787,48 @@ def _check_class_colors(key: str, asset: dict[str, Any], files: _AssetFiles) -> 
             )
         ]
     return defects
+
+
+def _check_palette_classes(key: str, asset: dict[str, Any], files: _AssetFiles) -> list[DataDefect]:
+    """A band drawn through a color table SHOULD name its classes.
+
+    A palette band (an embedded TIFF ``ColorMap``) is the file's own signal
+    that its pixels are categories. Without ``classification:classes`` a
+    client can draw it but cannot say what any color means.
+    """
+    described = {
+        0 if found.band_index is None else found.band_index
+        for found in asset_class_lists("", asset)
+    }
+    # A bit-packed band names its values with classification:bitfields.
+    for field in BAND_FIELDS:
+        bands = asset.get(field)
+        if isinstance(bands, list):
+            described.update(
+                index
+                for index, band in enumerate(bands)
+                if isinstance(band, dict) and _BITFIELDS in band
+            )
+    try:
+        src = files.raster()
+        palette = [
+            index
+            for index, interp in enumerate(src.colorinterp)
+            if interp == ColorInterp.palette and index not in described
+        ]
+    except Exception:  # noqa: BLE001 - an unreadable raster is reported by PTL-DAT-002
+        return []
+    return [
+        DataDefect(
+            DAT_PALETTE_CLASSES,
+            Severity.WARNING,
+            f"asset '{key}' band {index + 1} draws through an embedded color table but"
+            " declares no classification:classes",
+            key,
+            f"bands/{index}",
+        )
+        for index in palette
+    ]
 
 
 # OGC 21-026 /req/optimized_geotiff/small-sizes: square internal tiles "sized

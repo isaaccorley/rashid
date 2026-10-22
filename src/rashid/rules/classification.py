@@ -19,15 +19,14 @@ included:
   without ``#``.
 - ``PTL-CLS-003`` a class marked ``nodata`` has the band's ``nodata`` value.
 - ``PTL-CLS-004`` every class value fits the band's ``data_type``.
+- ``PTL-CLS-005`` the list sits on a band in STAC 1.1 ``bands``.
+- ``PTL-CLS-006`` a collection of scene items repeats its items' class lists
+  in ``item_assets``.
 
-Whether a ``color_hint`` agrees with the colour table embedded in the COG is a
-bytes question, so it lives in the data pass (``PTL-DAT-018``), which reads
-the lists through :func:`asset_class_lists`.
-
-The draft spec text for classified rasters numbers these PORTO-FMT-052
-(class fields), PORTO-FMT-053 (``color_hint``), PORTO-FMT-054 (colour table)
-and PORTO-FMT-057 (nodata class). The vendored requirements do not carry them
-yet, so the rules cite no requirement IDs until they do.
+Whether a ``color_hint`` agrees with the colour table embedded in the COG
+(``PTL-DAT-018``), and whether a palette band has classes at all
+(``PTL-DAT-019``), are bytes questions, so they live in the data pass, which
+reads the lists through :func:`asset_class_lists`.
 """
 
 from __future__ import annotations
@@ -125,24 +124,30 @@ def asset_class_lists(pointer: str, asset: dict[str, Any]) -> list[ClassList]:
     return found
 
 
-def class_lists(node: Node) -> list[ClassList]:
-    """Every class list on a collection or item.
+def _containers(node: Node) -> Iterator[tuple[str, dict[str, Any]]]:
+    """(pointer, object) for every place a class list can sit on a node.
 
-    Covers the object's own fields (an item's ``properties``), each asset, and
-    each ``item_assets`` template, whose classes items inherit.
+    The object's own fields (an item's ``properties``), each asset, and each
+    ``item_assets`` template, whose classes items inherit.
     """
-    found: list[ClassList] = []
-    own, own_pointer = node.data, ""
     if node.kind == "item" and isinstance(node.data.get("properties"), dict):
-        own, own_pointer = node.data["properties"], "/properties"
-    found.extend(asset_class_lists(own_pointer, own))
+        yield "/properties", node.data["properties"]
+    else:
+        yield "", node.data
     for field in ("assets", "item_assets"):
         assets = node.data.get(field)
         if not isinstance(assets, dict):
             continue
         for key, asset in assets.items():
             if isinstance(asset, dict):
-                found.extend(asset_class_lists(f"/{field}/{key}", asset))
+                yield f"/{field}/{key}", asset
+
+
+def class_lists(node: Node) -> list[ClassList]:
+    """Every class list on a collection or item."""
+    found: list[ClassList] = []
+    for pointer, container in _containers(node):
+        found.extend(asset_class_lists(pointer, container))
     return found
 
 
@@ -195,6 +200,7 @@ class ClassListRule(Rule):
         " name of letters, digits, '-' and '_', a title, and a six-hex-digit color_hint"
     )
     kinds = ("collection", "item")
+    spec_ids = ("PORTO-FMT-052", "PORTO-FMT-053")
 
     def check(self, node: Node, graph: CatalogGraph) -> Iterable[Finding]:
         for found in class_lists(node):
@@ -328,6 +334,7 @@ class NodataClassRule(Rule):
     default_severity = Severity.ERROR
     description = "a class marked nodata has the value of its band's nodata"
     kinds = ("collection", "item")
+    spec_ids = ("PORTO-FMT-057",)
 
     def check(self, node: Node, graph: CatalogGraph) -> Iterable[Finding]:
         for found in class_lists(node):
@@ -368,6 +375,9 @@ class ClassValueRangeRule(Rule):
     default_severity = Severity.ERROR
     description = "every class value fits the range of its band's data_type"
     kinds = ("collection", "item")
+    # A value the band cannot hold is not the integer pixel value the class
+    # object requires.
+    spec_ids = ("PORTO-FMT-052",)
 
     def check(self, node: Node, graph: CatalogGraph) -> Iterable[Finding]:
         for found in class_lists(node):
@@ -390,3 +400,90 @@ class ClassValueRangeRule(Rule):
                         expected=[low, high],
                         actual=value,
                     )
+
+
+def _band_has_classes(asset: dict[str, Any], index: int) -> bool:
+    bands = asset.get("bands")
+    if not isinstance(bands, list) or index >= len(bands):
+        return False
+    band = bands[index]
+    return isinstance(band, dict) and CLASSES_FIELD in band
+
+
+class BandPlacementRule(Rule):
+    """A class list sits on the band it describes, in STAC 1.1 ``bands``.
+
+    The band carries the ``nodata`` and ``data_type`` the classes are read
+    against, and a multi-band asset needs to say which band is classified. A
+    legacy ``raster:bands`` list passes when the same band in ``bands`` carries
+    the classes too, since it then only mirrors them for older readers.
+    """
+
+    id = "PTL-CLS-005"
+    default_severity = Severity.ERROR
+    description = "a classification:classes list sits on its band in the STAC 1.1 bands array"
+    kinds = ("collection", "item")
+    spec_ids = ("PORTO-FMT-050",)
+
+    def check(self, node: Node, graph: CatalogGraph) -> Iterable[Finding]:
+        for pointer, container in _containers(node):
+            for found in asset_class_lists(pointer, container):
+                if found.band_field == "bands":
+                    continue
+                if found.band_index is not None:
+                    if _band_has_classes(container, found.band_index):
+                        continue
+                    target = f"bands/{found.band_index}"
+                else:
+                    target = "the band it describes in bands"
+                yield self.finding(
+                    node,
+                    f"{found.pointer} is not on a band in the STAC 1.1 bands array",
+                    json_pointer=found.pointer,
+                    fix_hint=f"move the list onto {target}, next to that band's nodata",
+                )
+
+
+class ItemAssetClassesRule(Rule):
+    """A collection of scene items repeats the class lists in ``item_assets``.
+
+    A client builds a legend from the collection alone, without opening an
+    item, only when the collection's ``item_assets`` template carries the
+    classes its items' bands declare.
+    """
+
+    id = "PTL-CLS-006"
+    default_severity = Severity.WARNING
+    description = "a collection carries its items' band class lists in item_assets"
+    kinds = ("collection",)
+    spec_ids = ("PORTO-FMT-051",)
+
+    def check(self, node: Node, graph: CatalogGraph) -> Iterable[Finding]:
+        templates = node.data.get("item_assets")
+        templates = templates if isinstance(templates, dict) else {}
+        missing: dict[tuple[str, int], str] = {}
+        for item in graph.items_of(node):
+            assets = item.data.get("assets")
+            if not isinstance(assets, dict):
+                continue
+            for key, asset in assets.items():
+                if not isinstance(asset, dict):
+                    continue
+                for found in asset_class_lists("", asset):
+                    if found.band_field != "bands" or found.band_index is None:
+                        continue
+                    template = templates.get(key)
+                    if (key, found.band_index) in missing or (
+                        isinstance(template, dict) and _band_has_classes(template, found.band_index)
+                    ):
+                        continue
+                    missing[(key, found.band_index)] = item.path.as_posix()
+        for (key, index), example in missing.items():
+            yield self.finding(
+                node,
+                f"items such as {example} carry classes on asset '{key}' band {index},"
+                f" but item_assets/{key} does not",
+                json_pointer=f"/item_assets/{key}",
+                fix_hint=f"copy the class list into item_assets/{key}/bands/{index}"
+                f"/{CLASSES_FIELD}",
+            )
