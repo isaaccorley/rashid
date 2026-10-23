@@ -10,6 +10,7 @@ name: Spec Sync
 #
 # The PR comes from the org sync app, not GITHUB_TOKEN. GitHub starts no
 # workflow for a PR that GITHUB_TOKEN opens, so the verdict run never ran.
+# Auto-merge is armed, so a green PR lands on its own and a red one waits.
 
 on:
   schedule:
@@ -119,7 +120,7 @@ jobs:
           The test run on this PR is the verdict:
 
           - **Green** — a data-only change (new or edited catalog objects, newly
-            pinned extension schemas). Review and merge.
+            pinned extension schemas). Auto-merge lands it.
           - **Red on `test_schema_uri_invariant`** — the spec changed its schema URI or shape.
             rashid needs a matching code change (e.g. `SCHEMA_URI_PATTERN`, `DEFAULT_SCHEMA_URI`)
             on this branch before it can merge.
@@ -135,3 +136,5 @@ jobs:
               --title "chore: sync spec fixtures to ${SHORT}" \
               --body-file "$RUNNER_TEMP/pr-body.md"
           fi
+          # The required checks gate the merge. A red run holds the PR open.
+          gh pr merge --auto --squash "$BRANCH"
